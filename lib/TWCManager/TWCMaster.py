@@ -1,7 +1,7 @@
 #! /usr/bin/python3
 
 from lib.TWCManager.TWCSlave import TWCSlave
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 import os.path
 import queue
@@ -29,6 +29,7 @@ class TWCMaster:
     masterTWCID = ""
     maxAmpsToDivideAmongSlaves = 0
     modules = {}
+    nextHistorySnap = 0
     overrideMasterHeartbeatData = b""
     protocolVersion = 2
     releasedModules = []
@@ -71,6 +72,7 @@ class TWCMaster:
         self.debugLevel = config["config"]["debugLevel"]
         self.TWCID = TWCID
         self.subtractChargerLoad = config["config"]["subtractChargerLoad"]
+        self.advanceHistorySnap()
 
         # Register ourself as a module, allows lookups via the Module architecture
         self.registerModule({"name": "master", "ref": self, "type": "Master"})
@@ -81,6 +83,15 @@ class TWCMaster:
     def addSlaveTWC(self, slaveTWC):
         # Adds the Slave TWC to the Round Robin list
         return self.slaveTWCRoundRobin.append(slaveTWC)
+
+    def advanceHistorySnap(self):
+        try:
+          futureSnap = datetime.now().astimezone() + timedelta(minutes=5)
+          self.nextHistorySnap = futureSnap.replace(
+              minute=math.floor(futureSnap.minute / 5) * 5, second=0, microsecond=0
+          )
+        except ValueError as e:
+          self.debugLog(10, "TWCMaster", "Exception in advanceHistorySnap: " + str(e))
 
     def checkScheduledCharging(self):
 
@@ -416,7 +427,7 @@ class TWCMaster:
             # No slaves support returning voltage
             return (
                 self.config["config"].get("defaultVoltage", 240),
-                self.config["config"].get("numberOfPhases", 1)
+                self.config["config"].get("numberOfPhases", 1),
             )
 
         total = 0
@@ -542,7 +553,11 @@ class TWCMaster:
                     # We have detected that a vehicle has started charging on this Slave TWC
                     # Attempt to request the vehicle's VIN
                     slaveTWC.isCharging = 1
-                    self.getVehicleVIN(slaveTWC.TWCID, 0)
+                    self.queue_background_task({"cmd": "getVehicleVIN", "slaveTWC": slaveTWC.TWCID, "vinPart": 0})
+
+                    # Record our VIN query timestamp
+                    slaveTWC.lastVINQuery = time.time()
+                    slaveTWC.vinQueryAttempt = 1
             else:
                 if slaveTWC.isCharging == 1:
                     # A vehicle was previously charging and is no longer charging
@@ -553,6 +568,13 @@ class TWCMaster:
                         slaveTWC.lastVIN = slaveTWC.currentVIN
                     slaveTWC.currentVIN = ""
                     self.updateVINStatus()
+
+                    # Stop querying for Vehicle VIN
+                    slaveTWC.lastVINQuery = 0
+                    slaveTWC.vinQueryAttempt = 0
+
+                    # Close off the current charging session
+                    self.recordVehicleSessionEnd(slaveTWC)
                 slaveTWC.isCharging = 0
             carsCharging += slaveTWC.isCharging
             for module in self.getModulesByType("Status"):
@@ -631,6 +653,37 @@ class TWCMaster:
                     ),
                 )
 
+    def recordVehicleSessionEnd(self, slaveTWC):
+        # This function is called when a vehicle charge session ends.
+        # If we have a last vehicle VIN set, close off the charging session
+        # for this vehicle and save the settings.
+        if (not self.settings.get("Vehicles", None)):
+          self.settings["Vehicles"] = {}
+        if (self.settings["Vehicles"].get(slaveTWC.lastVIN, None)):
+          if (self.settings["Vehicles"][slaveTWC.lastVIN].get("startkWh", 0) > 0):
+            # End current session
+            delta = (slaveTWC.lifetimekWh - self.settings["Vehicles"][slaveTWC.lastVIN]["startkWh"])
+            self.settings["Vehicles"][slaveTWC.lastVIN]["startkWh"] = 0
+            self.settings["Vehicles"][slaveTWC.lastVIN]["totalkWh"] += delta
+            self.saveSettings()
+
+    def recordVehicleVIN(self, slaveTWC):
+        # Increment sessions counter for this VIN in persistent settings file
+        if (not self.settings.get("Vehicles", None)):
+          self.settings["Vehicles"] = {}
+        if (not self.settings["Vehicles"].get(slaveTWC.currentVIN, None)):
+          self.settings["Vehicles"][slaveTWC.currentVIN] = {
+            "chargeSessions": 1,
+            "startkWh": slaveTWC.lifetimekWh,
+            "totalkWh": 0
+          }
+        else:
+          self.settings["Vehicles"][slaveTWC.currentVIN]["chargeSessions"] += 1
+          self.settings["Vehicles"][slaveTWC.currentVIN]["startkWh"] = slaveTWC.lifetimekWh
+          if (not self.settings["Vehicles"][slaveTWC.currentVIN].get("totalkWh", None)):
+            self.settings["Vehicles"][slaveTWC.currentVIN]["totalkWh"] = 0
+        self.saveSettings()
+
     def releaseBackgroundTasksLock(self):
         self.backgroundTasksLock.release()
 
@@ -646,11 +699,7 @@ class TWCMaster:
         if modules.get(fullname, None):
             del modules[fullname]
 
-        self.debugLog(
-            7,
-            "TWCMaster",
-            f("Released module {colored(module, 'red')}"),
-        )
+        self.debugLog(7, "TWCMaster", f("Released module {colored(module, 'red')}"))
 
     def removeNormalChargeLimit(self, ID):
         if "chargeLimits" in self.settings and str(ID) in self.settings["chargeLimits"]:
@@ -662,6 +711,19 @@ class TWCMaster:
         # tracking again
         self.settings["chargeNowAmps"] = 0
         self.settings["chargeNowTimeEnd"] = 0
+
+    def retryVINQuery(self):
+        # For each Slave TWC, check if it's been more than 60 seconds since the last
+        # VIN query without a VIN. If so, query again.
+        for slaveTWC in self.getSlaveTWCs():
+           if slaveTWC.isCharging == 1:
+              if (slaveTWC.lastVINQuery > 0 and slaveTWC.vinQueryAttempt < 6 and not slaveTWC.currentVIN):
+                 if ((time.time() - slaveTWC.lastVINQuery) >= 60):
+                     self.queue_background_task({"cmd": "getVehicleVIN", "slaveTWC": slaveTWC.TWCID, "vinPart": 0})
+                     slaveTWC.vinQueryAttempt += 1
+                     slaveTWC.lastVINQuery = time.time()
+           else:
+              slaveTWC.lastVINQuery = 0
 
     def saveNormalChargeLimit(self, ID, outsideLimit, lastApplied):
         if not "chargeLimits" in self.settings:
@@ -906,6 +968,39 @@ class TWCMaster:
 
     def setSpikeAmps(self, amps):
         self.spikeAmpsToCancel6ALimit = amps
+
+    def snapHistoryData(self):
+        snaptime = self.nextHistorySnap
+        now = datetime.now().astimezone()
+        avgCurrent = 0
+
+        if now < snaptime:
+            return
+
+        for slave in self.getSlaveTWCs():
+            avgCurrent += slave.historyAvgAmps
+            slave.historyNumSamples = 0
+        self.advanceHistorySnap()
+
+        if avgCurrent > 0:
+            periodTimestamp = snaptime - timedelta(minutes=5)
+
+            if not "history" in self.settings:
+                self.settings["history"] = []
+
+            self.settings["history"].append(
+                (
+                    periodTimestamp.isoformat(timespec="seconds"),
+                    self.convertAmpsToWatts(avgCurrent),
+                )
+            )
+
+            self.settings["history"] = [
+                e
+                for e in self.settings["history"]
+                if datetime.fromisoformat(e[0]) >= (now - timedelta(days=2))
+            ]
+            self.saveSettings()
 
     def startCarsCharging(self):
         # This function is the opposite functionality to the stopCarsCharging function
