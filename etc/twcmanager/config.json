@@ -369,8 +369,8 @@
       # SolarEdge API
         "SolarEdge": {
           "enabled": false,
-          "apiKey": "",
-          "siteID": ""
+          "apiKey": "M2B9BGS7G1FWHJR3V8IV9KXRPJHMVUHM",
+          "siteID": "1597012"
         },
       # The energy detective
         "TED": {
