@@ -3,10 +3,10 @@
 
 class SolarEdgeMeter:
 
-	import solaredge_modbus
     import re
     import requests
     import time
+    import solaredge_modbus
 
 #todo variablen prüfen
     cacheTime = 10    # wait 10 seconds between modbus requests
@@ -26,8 +26,8 @@ class SolarEdgeMeter:
     status = False
     timeout = 10
     #voltage = 0
-	inverter = None   #SolarEdge inverter
-	meter1 = None     #SolarEdge power meter
+    inverter = None   #SolarEdge inverter
+    meter1 = None     #SolarEdge power meter
 	
 
     def __init__(self, master):
@@ -52,9 +52,9 @@ class SolarEdgeMeter:
           self.master.releaseModule("lib.TWCManager.EMS","SolarEdgeMeter");
 		  
 		##todo try...catch
-		inverter = solaredge_modbus.Inverter(host=serverIP, port=serverPort)
-		inverter.meters()
-		meter1 = inverter.meters()["Meter1"]
+        inverter = solaredge_modbus.Inverter(host=serverIP, port=serverPort)
+        inverter.meters()
+        meter1 = inverter.meters()["Meter1"]
 
 
     def debugLog(self, minlevel, message):
@@ -88,21 +88,20 @@ class SolarEdgeMeter:
 
         if (int(self.time.time()) - self.lastFetch) > self.cacheTime:
             # Cache has expired. Fetch values from modbus
-			try
-				# read the exported power from the meter
-				p_dict = meter1.read("power")   # returns a dict with one entry, not a value!
-				p = p_dict['power']             # get the value from the dict
-				# read the scale factor for the exported power from the meter
-				p_scale_dict = meter1.read("power_scale")   #returns a dict with one entry, not a value!
-				p_scale = p_scale_dict['power_scale']       #get the value from the dict
+            try:
+                # read the exported power from the meter
+                p_dict = meter1.read("power")   # returns a dict with one entry, not a value!
+                p = p_dict['power']             # get the value from the dict
+                # read the scale factor for the exported power from the meter
+                p_scale_dict = meter1.read("power_scale")   #returns a dict with one entry, not a value!
+                p_scale = p_scale_dict['power_scale']       #get the value from the dict
 
-				self.generatedW = p * (10 ** p_scale)
-				print(f"Einspeisung:  {self.generatedW}")
-				self.lastFetch = int(self.time.time())
-			except:
-				self.generatedW = 0
+                self.generatedW = p * (10 ** p_scale)
+                #print(f"Einspeisung:  {self.generatedW}")
+                self.lastFetch = int(self.time.time())
+            except:
+                self.generatedW = 0
                 self.debugLog(5, "Failed to values from modbus from SolarEdgeMeter")
-
             return True
         else:
             # Cache time has not elapsed since last fetch, serve from cache.

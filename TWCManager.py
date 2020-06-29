@@ -56,9 +56,9 @@ modules_available = [
     "Control.MQTTControl",
     "EMS.Fronius",
     "EMS.HASS",
-    "EMS.SolarEdge",
     "EMS.TeslaPowerwall2",
     "EMS.TED",
+	"EMS.SolarEdgeMeter",
     "Status.HASSStatus",
     "Status.MQTTStatus",
 ]
@@ -967,7 +967,7 @@ while True:
                     if vinPart < 2:
                         vinPart += 1
                         master.getVehicleVIN(senderID, vinPart)
-                        master.queue_background_task({"cmd": "getVehicleVIN", "slaveTWC": senderID, "vinPart": str(vinPart)})
+                        self.queue_background_task({"cmd": "getVehicleVIN", "slaveTWC": senderID, "vinPart": str(vinPart)})
                     else:
                         slaveTWC.currentVIN = "".join(slaveTWC.VINData)
                         # Clear VIN retry timer
