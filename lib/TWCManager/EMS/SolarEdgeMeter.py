@@ -52,9 +52,9 @@ class SolarEdgeMeter:
           self.master.releaseModule("lib.TWCManager.EMS","SolarEdgeMeter");
 		  
 		##todo try...catch
-        inverter = solaredge_modbus.Inverter(host=serverIP, port=serverPort)
-        inverter.meters()
-        meter1 = inverter.meters()["Meter1"]
+        self.inverter = solaredge_modbus.Inverter(host=serverIP, port=serverPort)
+        self.inverter.meters()
+        self.meter1 = self.inverter.meters()["Meter1"]
 
 
     def debugLog(self, minlevel, message):
