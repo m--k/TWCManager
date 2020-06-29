@@ -16,6 +16,7 @@ setup(
         "sysv_ipc>=1.0.1",
         "termcolor>=1.1.0",
         "ww>=0.2.1",
+        "solaredge_modbus>=0.5.0",
     ],
     # Package Metadata
     author="Nathan Gardiner",
