@@ -1,10 +1,9 @@
 # Read the currently exported energy from a power meter that is connected to a SolarEdge inverter
-# You must enable ModBusTCP, using the Solaredge SetApp
+# You must enable ModBusTCP in your inverter, using the Solaredge SetApp
 
 class SolarEdgeMeter:
 
     import re
-    import requests
     import time
     import solaredge_modbus
 
@@ -52,6 +51,7 @@ class SolarEdgeMeter:
           self.master.releaseModule("lib.TWCManager.EMS","SolarEdgeMeter");
 		  
 		##todo try...catch
+        import solaredge_modbus
         self.inverter = solaredge_modbus.Inverter(host=serverIP, port=serverPort)
         self.inverter.meters()
         self.meter1 = self.inverter.meters()["Meter1"]
