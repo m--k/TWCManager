@@ -30,6 +30,7 @@ class SolarEdgeMeter:
 	
 
     def __init__(self, master):
+        self.debugLog(1, "__init__() called")
         self.master = master
         self.config = master.config
         try:
@@ -43,6 +44,7 @@ class SolarEdgeMeter:
         self.debugLevel = self.configConfig.get("debugLevel", 0)
         self.status = self.configSolarEdgeMeter.get("enabled", False)
         self.serverIP = self.configSolarEdgeMeter.get("serverIP", None)
+        self.debugLog(1, f"serverIP:  {self.serverIP}")
         self.serverPort = self.configSolarEdgeMeter.get("serverPort", "1502")
 
         # Unload if this module is disabled or misconfigured
@@ -62,8 +64,9 @@ class SolarEdgeMeter:
             print("SolarEdgeMeter: (" + str(minlevel) + ") " + message)
 
     def getConsumption(self):
+        self.debugLog(1, "getConsumption() called")
         if not self.status:
-            self.debugLog(10, "SolarEdgeMeter EMS Module Disabled. Skipping getConsumption")
+            self.debugLog(1, "SolarEdgeMeter EMS Module Disabled. Skipping getConsumption")
             return 0
 
         # Perform updates if necessary
@@ -73,8 +76,9 @@ class SolarEdgeMeter:
         return float(0)    # we are measuring directly the exported energy with a SolarEdge modbus power meter. So we set always Consumption=0 and Generation=exported power
 
     def getGeneration(self):
+        self.debugLog(1, "getGeneration() called")
         if not self.status:
-            self.debugLog(10, "SolarEdgeMeter EMS Module Disabled. Skipping getGeneration")
+            self.debugLog(1, "SolarEdgeMeter EMS Module Disabled. Skipping getGeneration")
             return 0
 
         # Perform updates if necessary
@@ -85,7 +89,7 @@ class SolarEdgeMeter:
 
   
     def update(self):
-
+        self.debugLog(1, "update() called")
         if (int(self.time.time()) - self.lastFetch) > self.cacheTime:
             # Cache has expired. Fetch values from modbus
             try:
@@ -101,7 +105,7 @@ class SolarEdgeMeter:
                 self.lastFetch = int(self.time.time())
             except:
                 self.generatedW = 0
-                self.debugLog(5, "Failed to values from modbus from SolarEdgeMeter")
+                self.debugLog(1, "Failed to values from modbus from SolarEdgeMeter")
             return True
         else:
             # Cache time has not elapsed since last fetch, serve from cache.
