@@ -31,6 +31,7 @@ class SolarEdgeMeter:
 
     def __init__(self, master):
         self.debugLog(1, "__init__() called")
+        print("SolarEdgeMeter: " + "__init__() called")) 
         self.master = master
         self.config = master.config
         try:
@@ -65,6 +66,7 @@ class SolarEdgeMeter:
 
     def getConsumption(self):
         self.debugLog(1, "getConsumption() called")
+        print("SolarEdgeMeter: getConsumption() called")
         if not self.status:
             self.debugLog(1, "SolarEdgeMeter EMS Module Disabled. Skipping getConsumption")
             return 0
