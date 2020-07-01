@@ -31,7 +31,7 @@ class SolarEdgeMeter:
 
     def __init__(self, master):
         self.debugLog(1, "__init__() called")
-        print("SolarEdgeMeter: " + "__init__() called")) 
+        print("SolarEdgeMeter: __init__() called") 
         self.master = master
         self.config = master.config
         try:
