@@ -52,7 +52,7 @@ class SolarEdgeMeter:
 		  
 		##todo try...catch
         import solaredge_modbus
-        self.inverter = solaredge_modbus.Inverter(host=serverIP, port=serverPort)
+        self.inverter = solaredge_modbus.Inverter(host="192.168.178.81", port=self.serverPort)
         self.inverter.meters()
         self.meter1 = self.inverter.meters()["Meter1"]
 
@@ -97,7 +97,7 @@ class SolarEdgeMeter:
                 p_scale = p_scale_dict['power_scale']       #get the value from the dict
 
                 self.generatedW = p * (10 ** p_scale)
-                #print(f"Einspeisung:  {self.generatedW}")
+                self.debugLog(1, f"Einspeisung:  {self.generatedW}")
                 self.lastFetch = int(self.time.time())
             except:
                 self.generatedW = 0
