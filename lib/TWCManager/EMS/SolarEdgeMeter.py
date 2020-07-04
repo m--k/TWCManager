@@ -108,7 +108,7 @@ class SolarEdgeMeter:
             #except:
                 #self.generatedW = 0
                 #self.debugLog(1, "Failed to values from modbus from SolarEdgeMeter")
-            return True
+                return True
         else:
             # Cache time has not elapsed since last fetch, serve from cache.
             return False
