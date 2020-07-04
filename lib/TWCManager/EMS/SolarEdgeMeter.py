@@ -94,7 +94,7 @@ class SolarEdgeMeter:
         self.debugLog(1, "update() called")
         if (int(self.time.time()) - self.lastFetch) > self.cacheTime:
             # Cache has expired. Fetch values from modbus
-            try:
+            #try:
                 # read the exported power from the meter
                 p_dict = meter1.read("power")   # returns a dict with one entry, not a value!
                 p = p_dict['power']             # get the value from the dict
@@ -105,9 +105,9 @@ class SolarEdgeMeter:
                 self.generatedW = p * (10 ** p_scale)
                 self.debugLog(1, f"Einspeisung:  {self.generatedW}")
                 self.lastFetch = int(self.time.time())
-            except:
-                self.generatedW = 0
-                self.debugLog(1, "Failed to values from modbus from SolarEdgeMeter")
+            #except:
+                #self.generatedW = 0
+                #self.debugLog(1, "Failed to values from modbus from SolarEdgeMeter")
             return True
         else:
             # Cache time has not elapsed since last fetch, serve from cache.
