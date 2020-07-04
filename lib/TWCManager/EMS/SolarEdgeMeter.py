@@ -96,10 +96,10 @@ class SolarEdgeMeter:
             # Cache has expired. Fetch values from modbus
             #try:
                 # read the exported power from the meter
-                p_dict = meter1.read("power")   # returns a dict with one entry, not a value!
+                p_dict = self.meter1.read("power")   # returns a dict with one entry, not a value!
                 p = p_dict['power']             # get the value from the dict
                 # read the scale factor for the exported power from the meter
-                p_scale_dict = meter1.read("power_scale")   #returns a dict with one entry, not a value!
+                p_scale_dict = self.meter1.read("power_scale")   #returns a dict with one entry, not a value!
                 p_scale = p_scale_dict['power_scale']       #get the value from the dict
 
                 self.generatedW = p * (10 ** p_scale)
