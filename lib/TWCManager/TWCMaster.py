@@ -140,11 +140,11 @@ class TWCMaster:
 
     def convertAmpsToWatts(self, amps):
         (voltage, phases) = self.getVoltageMeasurement()
-        return math.sqrt(phases) * voltage * amps
+        return phases * voltage * amps
 
     def convertWattsToAmps(self, watts):
         (voltage, phases) = self.getVoltageMeasurement()
-        return watts / (math.sqrt(phases) * voltage)
+        return watts / (phases * voltage)
 
     def countSlaveTWC(self):
         return int(len(self.slaveTWCRoundRobin))
@@ -407,11 +407,12 @@ class TWCMaster:
                     "amps_in_use",
                     "ampsInUse",
                     slaveTWC.reportedAmpsActual,
+                    "A",
                 )
 
         for module in self.getModulesByType("Status"):
             module["ref"].setStatus(
-                bytes("all", "UTF-8"), "total_amps_in_use", "totalAmpsInUse", totalAmps
+                bytes("all", "UTF-8"), "total_amps_in_use", "totalAmpsInUse", totalAmps, "A"
             )
 
         self.debugLog(
@@ -438,7 +439,7 @@ class TWCMaster:
             if all([slave.voltsPhaseC > 0 for slave in slavesWithVoltage]):
                 total = sum(
                     [
-                        sum(slave.voltsPhaseA, slave.voltsPhaseB, slave.voltsPhaseC)
+                        (slave.voltsPhaseA + slave.voltsPhaseB + slave.voltsPhaseC)
                         for slave in slavesWithVoltage
                     ]
                 )
@@ -448,7 +449,10 @@ class TWCMaster:
                     "TWCMaster",
                     "FATAL:  Mix of three-phase and single-phase not currently supported.",
                 )
-                return (240, 1)
+                return (
+                    self.config["config"].get("defaultVoltage", 240),
+                    self.config["config"].get("numberOfPhases", 1),
+                )
         else:
             # Single-phase system
             total = sum([slave.voltsPhaseA for slave in slavesWithVoltage])
@@ -558,6 +562,9 @@ class TWCMaster:
                     # Record our VIN query timestamp
                     slaveTWC.lastVINQuery = time.time()
                     slaveTWC.vinQueryAttempt = 1
+
+                    # Record start of current charging session
+                    self.recordVehicleSessionStart(slaveTWC)
             else:
                 if slaveTWC.isCharging == 1:
                     # A vehicle was previously charging and is no longer charging
@@ -579,7 +586,7 @@ class TWCMaster:
             carsCharging += slaveTWC.isCharging
             for module in self.getModulesByType("Status"):
                 module["ref"].setStatus(
-                    slaveTWC.TWCID, "cars_charging", "carsCharging", slaveTWC.isCharging
+                    slaveTWC.TWCID, "cars_charging", "carsCharging", slaveTWC.isCharging, ""
                 )
         self.debugLog(
             10, "TWCMaster", "Number of cars charging now: " + str(carsCharging)
@@ -598,7 +605,7 @@ class TWCMaster:
         )
         for module in self.getModulesByType("Status"):
             module["ref"].setStatus(
-                slaveTWC.TWCID, "cars_charging", "carsCharging", carsCharging
+                slaveTWC.TWCID, "cars_charging", "carsCharging", carsCharging, ""
             )
         return carsCharging
 
@@ -667,7 +674,38 @@ class TWCMaster:
             self.settings["Vehicles"][slaveTWC.lastVIN]["totalkWh"] += delta
             self.saveSettings()
 
+        # Update Charge Session details in logging modules
+        for module in self.getModulesByType("Logging"):
+            module["ref"].stopChargeSession({
+                "TWCID": slaveTWC.TWCID,
+                "endkWh": slaveTWC.lifetimekWh,
+                "endTime": int(time.time()),
+                "endFormat": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
+
+
+    def recordVehicleSessionStart(self, slaveTWC):
+        # Update Charge Session details in logging modules
+        for module in self.getModulesByType("Logging"):
+            module["ref"].startChargeSession({
+                "TWCID": slaveTWC.TWCID,
+                "startkWh": slaveTWC.lifetimekWh,
+                "startTime": int(time.time()),
+                "startFormat": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            })
+
     def recordVehicleVIN(self, slaveTWC):
+        # Record Slave TWC ID as being capable of reporting VINs, if it is not
+        # already.
+        twcid = "%02X%02X" % (slaveTWC.TWCID[0], slaveTWC.TWCID[1])
+        if (not self.settings.get("SlaveTWCs", None)):
+            self.settings["SlaveTWCs"] = {}
+        if (not self.settings["SlaveTWCs"].get(twcid, None)):
+            self.settings["SlaveTWCs"][twcid] = {}
+        if (not self.settings["SlaveTWCs"][twcid].get("supportsVINQuery", 0)):
+            self.settings["SlaveTWCs"][twcid]["supportsVINQuery"] = 1
+            self.saveSettings()
+
         # Increment sessions counter for this VIN in persistent settings file
         if (not self.settings.get("Vehicles", None)):
           self.settings["Vehicles"] = {}
@@ -683,6 +721,13 @@ class TWCMaster:
           if (not self.settings["Vehicles"][slaveTWC.currentVIN].get("totalkWh", None)):
             self.settings["Vehicles"][slaveTWC.currentVIN]["totalkWh"] = 0
         self.saveSettings()
+
+        # Update Charge Session details in logging modules
+        for module in self.getModulesByType("Logging"):
+            module["ref"].updateChargeSession({
+                "TWCID": slaveTWC.TWCID,
+                "vehicleVIN": slaveTWC.currentVIN
+            })
 
     def releaseBackgroundTasksLock(self):
         self.backgroundTasksLock.release()
@@ -745,7 +790,11 @@ class TWCMaster:
 
         # Step 2 - Write the settings dict to a JSON file
         with open(fileName, "w") as outconfig:
-            json.dump(self.settings, outconfig)
+            try:
+                json.dump(self.settings, outconfig)
+            except TypeError as e:
+                self.debugLog(1, "TWCMaster", "Exception raised while attempting to save settings file:")
+                self.debugLog(1, "TWCMaster", str(e))
 
     def send_master_linkready1(self):
 
@@ -1047,6 +1096,7 @@ class TWCMaster:
                         "lifetime_kwh",
                         "lifetimekWh",
                         slaveTWC.lifetimekWh,
+                        "kWh",
                     )
 
                     # Publish phase 1, 2 and 3 values via Status modules
@@ -1057,6 +1107,7 @@ class TWCMaster:
                                 "voltage_phase_" + phase.lower(),
                                 "voltagePhase" + phase,
                                 getattr(slaveTWC, "voltsPhase" + phase, 0),
+                                "V",
                             )
 
     def updateVINStatus(self):
@@ -1068,6 +1119,7 @@ class TWCMaster:
                     "current_vehicle_vin",
                     "currentVehicleVIN",
                     slaveTWC.currentVIN,
+                    "",
                 )
             for module in self.getModulesByType("Status"):
                 module["ref"].setStatus(
@@ -1075,4 +1127,5 @@ class TWCMaster:
                     "last_vehicle_vin",
                     "lastVehicleVIN",
                     slaveTWC.lastVIN,
+                    "",
                 )

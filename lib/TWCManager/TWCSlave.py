@@ -137,9 +137,16 @@ class TWCSlave:
                 or abs(ampsUsed - lastAmpsUsed) >= 1.0
                 or self.time.time() - self.timeLastHeartbeatDebugOutput > 600
             ):
-                self.master.debugLog(1, "TWCSlave  ", debugOutput)
+                self.master.debugLog(1, "TWCSlave", debugOutput)
                 self.lastHeartbeatDebugOutput = debugOutput
                 self.timeLastHeartbeatDebugOutput = self.time.time()
+
+                for module in self.master.getModulesByType("Logging"):
+                    module["ref"].slavePower({
+                        "TWCID": self.TWCID,
+                        "status": heartbeatData[0]
+                    })
+
         except IndexError:
             # This happens if we try to access, say, heartbeatData[8] when
             # len(heartbeatData) < 9. This was happening due to a bug I fixed
@@ -463,9 +470,9 @@ class TWCSlave:
 
         for module in self.master.getModulesByType("Status"):
             module["ref"].setStatus(
-                self.TWCID, "amps_max", "ampsMax", self.reportedAmpsMax
+                self.TWCID, "amps_max", "ampsMax", self.reportedAmpsMax, "A"
             )
-            module["ref"].setStatus(self.TWCID, "state", "state", self.reportedState)
+            module["ref"].setStatus(self.TWCID, "state", "state", self.reportedState, "")
 
         # Log current history
         self.historyAvgAmps = (
@@ -521,7 +528,7 @@ class TWCSlave:
             self.reportedAmpsActualSignificantChangeMonitor = self.reportedAmpsActual
             for module in self.master.getModulesByType("Status"):
                 module["ref"].setStatus(
-                    self.TWCID, "power", "power", self.reportedAmpsActual
+                    self.TWCID, "power", "power", self.reportedAmpsActual, "A"
                 )
 
         ltNow = self.time.localtime()

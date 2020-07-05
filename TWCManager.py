@@ -58,7 +58,11 @@ modules_available = [
     "EMS.HASS",
     "EMS.TeslaPowerwall2",
     "EMS.TED",
-	"EMS.SolarEdgeMeter",
+    "EMS.SolarEdgeMeter",
+    "Logging.ConsoleLogging",
+    "Logging.CSVLogging",
+    "Logging.MySQLLogging",
+#    "Logging.SQLiteLogging",
     "Status.HASSStatus",
     "Status.MQTTStatus",
 ]
@@ -239,9 +243,11 @@ def check_green_energy():
     # to match those used in your environment. This is configured
     # in the config section at the top of this file.
     #
-    master.setConsumption(
-        "Manual", master.convertAmpsToWatts(config["config"]["greenEnergyAmpsOffset"])
-    )
+    greenEnergyAmpsOffset = config["config"]["greenEnergyAmpsOffset"]
+    if (greenEnergyAmpsOffset >= 0):
+        master.setConsumption("Manual", master.convertAmpsToWatts(greenEnergyAmpsOffset))
+    else:
+        master.setGeneration("Manual", -1 * master.convertAmpsToWatts(greenEnergyAmpsOffset))
     # Poll all loaded EMS modules for consumption and generation values
     for module in master.getModulesByType("EMS"):
         master.setConsumption(module["name"], module["ref"].getConsumption())
@@ -259,15 +265,14 @@ def update_statuses():
         genwatts = master.getGeneration()
         conwatts = master.getConsumption()
         chgwatts = master.getChargerLoad()
-        genwattsDisplay = f("{genwatts:.0f}W")
-        conwattsDisplay = f("{conwatts:.0f}W")
-        chgwattsDisplay = f("{chgwatts:.0f}W")
-        debugLog(
-            1,
-            f(
-                "Green energy generates {colored(genwattsDisplay, 'magenta')}, Consumption {colored(conwattsDisplay, 'magenta')}, Charger Load {colored(chgwattsDisplay, 'magenta')}"
-            ),
-        )
+
+        for module in master.getModulesByType("Logging"):
+            module["ref"].greenEnergy({
+                "genWatts": genwatts,
+                "conWatts": conwatts,
+                "chgWatts": chgwatts
+            })
+
         nominalOffer = master.convertWattsToAmps(
             genwatts
             - (conwatts - (chgwatts if config["config"]["subtractChargerLoad"] else 0))
@@ -304,13 +309,15 @@ def update_statuses():
             bytes("config", "UTF-8"),
             "min_amps_per_twc",
             "minAmpsPerTWC",
-            config["config"]["minAmpsPerTWC"],
+            config["config"]["minAmpsPerTWC"], 
+            "A",
         )
         module["ref"].setStatus(
             bytes("all", "UTF-8"),
             "max_amps_for_slaves",
             "maxAmpsForSlaves",
             master.getMaxAmpsToDivideAmongSlaves(),
+            "A",
         )
 
 
@@ -700,6 +707,22 @@ while True:
                 # sometimes our strings do end with a newline character that is
                 # actually the CRC byte with a value of 0A or 0D.
                 msgMatch = re.search(
+                    b"^\xfd\xb1(..)\x00\x00.+\Z", msg, re.DOTALL
+                )
+                if msgMatch and foundMsgMatch == False:
+                    # Handle acknowledgement of Start command
+                    foundMsgMatch = True
+                    senderID = msgMatch.group(1)
+
+                msgMatch = re.search(
+                    b"^\xfd\xb2(..)\x00\x00.+\Z", msg, re.DOTALL
+                )
+                if msgMatch and foundMsgMatch == False:
+                    # Handle acknowledgement of Stop command
+                    foundMsgMatch = True
+                    senderID = msgMatch.group(1)
+
+                msgMatch = re.search(
                     b"^\xfd\xe2(..)(.)(..)\x00\x00\x00\x00\x00\x00.+\Z", msg, re.DOTALL
                 )
                 if msgMatch and foundMsgMatch == False:
@@ -906,18 +929,16 @@ while True:
                     voltsPhaseC = (vPhaseC[0] << 8) + vPhaseC[1]
                     data = msgMatch.group(6)
 
-                    debugLog(
-                        1,
-                        "Slave TWC %02X%02X: Delivered %d kWh, voltage per phase: (%d, %d, %d)."
-                        % (
-                            senderID[0],
-                            senderID[1],
-                            kWh,
-                            voltsPhaseA,
-                            voltsPhaseB,
-                            voltsPhaseC,
-                        ),
-                    )
+                    for module in master.getModulesByType("Logging"):
+                        module["ref"].slaveStatus({
+                            "TWCID": senderID,
+                            "kWh": kWh,
+                            "voltsPerPhase": [
+                                voltsPhaseA,
+                                voltsPhaseB,
+                                voltsPhaseC
+                            ]
+                        })
 
                     # Update the timestamp of the last reciept of this message
                     master.lastkWhMessage = time.time()
