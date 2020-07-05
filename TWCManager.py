@@ -276,9 +276,13 @@ def update_statuses():
 
         nominalOffer = master.convertWattsToAmps(
             genwatts
-            - (conwatts - (chgwatts if config["config"]["subtractChargerLoad"] else 0))
+            #- (conwatts - (chgwatts if config["config"]["subtractChargerLoad"] else 0))
+            # changed to always substract
+            - (conwatts - chgwatts )
         )
-        debugLog(1,f("subtractChargerLoad {config["config"]["subtractChargerLoad"]}"),)
+        #for debugging:
+        substract=config["config"]["subtractChargerLoad"]
+        debugLog(1,f("subtractChargerLoad= {substract}"),)
         debugLog(1,f("Offering {genwatts}"),)
         if abs(maxamps - nominalOffer) > 0.005:
             nominalOfferDisplay = f("{nominalOffer:.2f}A")
