@@ -325,7 +325,7 @@
             "enabled": true
         },
         "CSV": {
-            "enabled": false,
+            "enabled": true,
             # The path under which the various csv files will be stored.
             # Make sure the user which runs the TWCManager process can write to
             # this directory.
