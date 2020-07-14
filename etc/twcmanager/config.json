@@ -336,9 +336,9 @@
             # logging modules
             "mute":{
                 "ChargeSessions": false,
-                "GreenEnergy": true,
-                "SlavePower": true,
-                "SlaveStatus": true
+                "GreenEnergy": false,
+                "SlavePower": false,
+                "SlaveStatus": false
             }
         },
         "MySQL": {
@@ -363,6 +363,11 @@
         # configured simultaneously, currently we will only add together the values recieved from each. This might be
         # useful if you have one interface that provides generation detail and another that provides consumption
         # detail, but if both systems provided both values, it would be duplicated.
+        "Enphase": {
+            "apiKey": "ABC123",
+            "systemID": "12345",
+            "userID": "4d6a51330a"
+        },
         "Fronius": {
           "enabled": false,
           "serverIP": "192.168.1.2"
