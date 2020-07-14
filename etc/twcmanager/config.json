@@ -291,13 +291,13 @@
       #   "charge_limit": "config.chargeNowLimit" },
 
       # { "name": "Scheduled Charging",
-        #   "match": [ "checkScheduledCharging()" ],
-        #   "condition": [ "eq" ],
-        #   "value": [ 1 ],
-        #   "charge_amps": "settings.scheduledAmpsMax",
-        #   "charge_limit": "config.scheduledLimit" },
+      #   "match": [ "checkScheduledCharging()" ],
+      #   "condition": [ "eq" ],
+      #   "value": [ 1 ],
+      #   "charge_amps": "settings.scheduledAmpsMax",
+      #   "charge_limit": "config.scheduledLimit" },
   
-        # { "name": "Track Green Energy",
+      # { "name": "Track Green Energy",
       #   "match": [ "tm_hour", "tm_hour", "settings.hourResumeTrackGreenEnergy" ],
       #   "condition": [ "gte", "lt", "lte" ],
       #   "value": [ 6, 20, "tm_hour" ],
@@ -306,12 +306,19 @@
       #   "charge_limit": "config.greenEnergyLimit" },
 
       # { "name": "Non Scheduled Charging",
-      #   "match": [ "none" ],
-      #   "condition": [ "none" ],
-      #   "value": [ 0 ],
+      #   "match": [ "settings.nonScheduledAction" ],
+      #   "condition": [ "lt" ],
+      #   "value": [3],
       #   "charge_amps": "settings.nonScheduledAmpsMax",
-      #   "charge_limit": "config.nonScheduledLimit" }
+      #   "charge_limit": "config.nonScheduledLimit" },
 
+      # { "name": "Track Green Energy",
+      #   "match": ["settings.nonScheduledAction"],
+      #   "condition": ["eq"],
+      #   "value": [3],
+      #   "background_task": "checkGreenEnergy",
+      #   "allowed_flex": "config.greenEnergyFlexAmps",
+      #   "charge_limit": "config.greenEnergyLimit" }
 
       ]
     },
@@ -369,8 +376,8 @@
             "userID": "4d6a51330a"
         },
         "Fronius": {
-          "enabled": false,
-          "serverIP": "192.168.1.2"
+            "enabled": false,
+            "serverIP": "192.168.1.2"
         },
         "HASS": {
       # The HASS module allows fetching of consumption and generation statistics from HomeAssistant sensors.
@@ -410,10 +417,12 @@
       # battery is then further depleted by the vehicle charging.
           "minBatteryLevel": 90
         },
-      # SolarEdge API
+      # SolarEdge API, consumed from the internet-based SolarEdge Potal
         "SolarEdge": {
           "enabled": false,
+      # API Key must be specified in order to monitor a SolarEdge site
           "apiKey": "M2B9BGS7G1FWHJR3V8IV9KXRPJHMVUHM",
+      # Site ID defines which system to monitor
           "siteID": "1597012"
         },
       # The energy detective

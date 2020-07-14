@@ -50,17 +50,31 @@ class Policy:
             "charge_limit": "config.greenEnergyLimit",
         },
         # If all else fails (ie no other policy match), we will charge at
-        # nonScheduledAmpsMax
+        # nonScheduledAmpsMax, unless overridden with nonScheduledAction,
+        # which may cause us to Track Green Energy instead.
         {
             "name": "Non Scheduled Charging",
-            "match": ["none"],
-            "condition": ["none"],
-            "value": [0],
+            "match": ["settings.nonScheduledAction"],
+            "condition": ["lt"],
+            "value": [3],
             "charge_amps": "settings.nonScheduledAmpsMax",
             "charge_limit": "config.nonScheduledLimit",
         },
+        # Non-Scheduled Track Green Energy (if configured)
+        # If selected in the Web UI, instead of falling back to non-scheduled
+        # amps, we'll fall back to non-scheduled Track Green Energy
+        {
+            "name": "Track Green Energy",
+            "match": ["settings.nonScheduledAction"],
+            "condition": ["eq"],
+            "value": [3],
+            "background_task": "checkGreenEnergy",
+            "allowed_flex": "config.greenEnergyFlexAmps",
+            "charge_limit": "config.greenEnergyLimit",
+        },
     ]
     lastPolicyCheck = 0
+    limitOverride = False
     master = None
     policyCheckInterval = 30
 
@@ -159,12 +173,7 @@ class Policy:
                 continue
 
         # No policy has matched; keep the current policy
-        current_policy = next(
-            policy
-            for policy in self.charge_policy
-            if policy["name"] == self.active_policy
-        )
-        self.enforcePolicy(current_policy)
+        self.enforcePolicy(self.getPolicyByName(self.active_policy))
 
     def enforcePolicy(self, policy, updateLatch=False):
         if self.active_policy != str(policy["name"]):
@@ -174,6 +183,7 @@ class Policy:
                 f("New policy selected; changing to {colored(policy['name'], 'red')}"),
             )
             self.active_policy = str(policy["name"])
+            self.limitOverride = False
 
         if updateLatch and "latch_period" in policy:
             policy["__latchTime"] = time.time() + policy["latch_period"] * 60
@@ -204,7 +214,13 @@ class Policy:
             self.master.queue_background_task({"cmd": bgt})
 
         # If a charge limit is defined for this policy, apply it
-        limit = self.policyValue(policy.get("charge_limit", -1))
+        limit = None
+        if self.limitOverride:
+            limit = self.master.getModuleByName("TeslaAPI").minBatteryLevelAtHome - 1
+            if limit < 50:
+                limit = 50
+        else:
+            limit = self.policyValue(policy.get("charge_limit", -1))
         if not (limit >= 50 and limit <= 100):
             limit = -1
         self.master.queue_background_task({"cmd": "applyChargeLimit", "limit": limit})
@@ -316,3 +332,9 @@ class Policy:
             if self.doesConditionMatch(match, condition, value, exitOn) == exitOn:
                 return exitOn
         return not exitOn
+    
+    def overrideLimit(self):
+        self.limitOverride = True
+
+    def clearOverride(self):
+        self.limitOverride = False

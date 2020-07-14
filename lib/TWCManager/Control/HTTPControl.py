@@ -42,14 +42,14 @@ class HTTPControl:
         # Unload if this module is disabled or misconfigured
         if (not self.status) or (int(self.httpPort) < 1):
             self.master.releaseModule("lib.TWCManager.Control", "HTTPControl")
+            return None
 
-        if self.status:
-            httpd = ThreadingSimpleServer(("", self.httpPort), HTTPControlHandler)
-            httpd.master = master
-            self.master.debugLog(
-                1, "HTTPCtrl  ", "Serving at port: " + str(self.httpPort)
-            )
-            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        httpd = ThreadingSimpleServer(("", self.httpPort), HTTPControlHandler)
+        httpd.master = master
+        self.master.debugLog(
+            1, "HTTPCtrl", "Serving at port: " + str(self.httpPort)
+        )
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
 
 class HTTPControlHandler(BaseHTTPRequestHandler):
@@ -226,7 +226,7 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
         )
         page += self.navbar_item("/", "Home")
         page += self.navbar_item("/policy", "Policy")
-        page += self.navbar_item("#", "Schedule")
+        page += self.navbar_item("/schedule", "Schedule")
         page += self.navbar_item("/settings", "Settings")
         page += self.navbar_item("/debug", "Debug")
         page += self.navbar_item("https://github.com/ngardiner/TWCManager", "GitHub")
@@ -350,7 +350,12 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
             json_data = json.dumps(data)
-            self.wfile.write(json_data.encode("utf-8"))
+            try:
+                self.wfile.write(json_data.encode("utf-8"))
+            except BrokenPipeError as e:
+                self.master.debugLog(
+                    10, "HTTPCtrl", "Connection Error: Broken Pipe"
+                )
 
         elif url.path == "/api/getHistory":
             output = []
@@ -499,6 +504,32 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
         """
         return page
 
+    def do_get_schedule(self):
+        page = "<html><head>"
+        page += "<title>TWCManager</title>"
+        page += self.do_bootstrap()
+        page += self.do_css()
+        page += self.do_jsrefresh()
+        page += "</head>"
+        page += "<body>"
+        page += self.do_navbar()
+        page += """
+        <table>
+          <tr>
+            <td><b>Resume tracking green energy at:</b></td>
+            <td><select name = 'resumeGreenEnergy'>
+        """
+        for hr in range(0,24):
+            page += "<option value = ''>" + str(hr) + "</option>"
+        page += """
+            </select></td>
+          </tr>
+        """
+        page += """
+    </body>
+        """
+        return page
+
     def do_get_settings(self):
         page = "<html><head>"
         page += "<title>TWCManager</title>"
@@ -533,16 +564,31 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
           </td>
         </tr>
         <tr>
-          <th>Non-scheduled power charge rate:</th>
+          <th>Non-Scheduled power action:</th>
           <td>
         """
         page += self.optionList(
-            [[6, "6A"], [8, "8A"], [10, "10A"], [12, "12A"], [24, "24A"], [32, "32A"]],
+            [ 
+                [1, "Charge at specified Non-Scheduled Charge Rate"],
+                [2, "Do not Charge"],
+                [3, "Track Green Energy"],
+            ],
             {
-                "name": "nonScheduledPower",
-                "value": self.server.master.settings.get("nonScheduledPower", "6"),
+                "name": "nonScheduledAction",
+                "value": self.server.master.settings.get("nonScheduledAction", "1"),
             },
         )
+        page += """
+        </tr>
+        <tr>
+          <th>Non-scheduled power charge rate:</th>
+          <td>
+        """
+        maxamps = self.server.master.config["config"].get("wiringMaxAmpsPerTWC", 5)
+        amps = []
+        for amp in range(5, (maxamps + 1)):
+            amps.append([amp, str(amp) + "A"])
+        page += self.optionList(amps, {"name": "nonScheduledAmpsMax", "value": self.server.master.settings.get("nonScheduledAmpsMax", "6")})
         page += """
           </td>
         </tr>
@@ -633,6 +679,14 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
             self.wfile.write(page.encode("utf-8"))
             return
 
+        if url.path == "/schedule":
+            self.send_response(200)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+            page = self.do_get_schedule()
+            self.wfile.write(page.encode("utf-8"))
+            return
+
         if url.path == "/settings":
             self.send_response(200)
             self.send_header("Content-type", "text/html")
@@ -671,7 +725,7 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
         if self.url.path == "/settings/save":
             # User has submitted settings.
             # Call dedicated function
-            self.process_settings()
+            self.process_save_settings()
             return
 
         if self.url.path == "/tesla-login":
@@ -702,7 +756,7 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
 
     def optionList(self, list, opts={}):
         page = "<div class='form-group'>"
-        page += "<select class='form-control' id='%s'>" % opts.get("name", "")
+        page += "<select class='form-control' id='%s' name='%s'>" % (opts.get("name", ""), opts.get("name", ""))
         for option in list:
             sel = ""
             if str(opts.get("value", "-1")) == str(option[0]):
@@ -712,13 +766,22 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
         page += "</select>"
         return page
 
-    def process_settings(self):
+    def process_save_settings(self):
 
         # Write settings
         for key in self.fields:
             keya = str(key)
             vala = self.fields[key][0].replace("'", "")
-            self.server.master.settings[keya] = vala
+            try:
+                if int(vala):
+                    self.server.master.settings[keya] = int(vala)
+            except ValueError:
+                self.server.master.settings[keya] = vala
+
+        # If Non-Scheduled power action is either Do not Charge or 
+        # Track Green Energy, set Non-Scheduled power rate to 0
+        if int(self.server.master.settings.get("nonScheduledAction", 1)) > 1:
+            self.server.master.settings['nonScheduledAmpsMax'] = 0
         self.server.master.saveSettings()
 
         # Redirect to the index page
