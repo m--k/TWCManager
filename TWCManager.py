@@ -267,7 +267,7 @@ def update_statuses():
         genwatts = master.getGeneration()
         conwatts = master.getConsumption()
         chgwatts = master.getChargerLoad()
-
+        debugLog(1,f("chgwatts= {chgwatts}"),)
         for module in master.getModulesByType("Logging"):
             module["ref"].greenEnergy({
                 "genWatts": genwatts,
@@ -284,24 +284,25 @@ def update_statuses():
         #for debugging:
         substract=config["config"]["subtractChargerLoad"]
         debugLog(1,f("subtractChargerLoad= {substract}"),)
-        debugLog(1,f("Offering {genwatts}"),)
-        if abs(maxamps - nominalOffer) > 0.005:
-            nominalOfferDisplay = f("{nominalOffer:.2f}A")
-            debugLog(
-                10,
-                f(
-                    "Offering {maxampsDisplay} instead of {nominalOfferDisplay} to compensate for inexact current draw"
-                ),
-            )
-            conwatts = genwatts - master.convertAmpsToWatts(maxamps)
-        generation = f("{master.convertWattsToAmps(genwatts):.2f}A")
-        consumption = f("{master.convertWattsToAmps(conwatts):.2f}A")
-        debugLog(
-            1,
-            f(
-                "Limiting charging to {colored(generation, 'magenta')} - {colored(consumption, 'magenta')} = {colored(maxampsDisplay, 'magenta')}."
-            ),
-        )
+        debugLog(1,f("Offering {nominalOffer}={genwatts}-({conwatts} - {chgwatts}) "),)
+        #if abs(maxamps - nominalOffer) > 0.005:
+        #    nominalOfferDisplay = f("{nominalOffer:.2f}A")
+        #    debugLog(
+        #        1,
+        #        f(
+        #            "Offering {maxampsDisplay} instead of {nominalOfferDisplay} to compensate for inexact current draw"
+        #        ),
+        #    )
+        #    this is creating the problem!
+        #    conwatts = genwatts - master.convertAmpsToWatts(maxamps)
+        #generation = f("{master.convertWattsToAmps(genwatts):.2f}A")
+        #consumption = f("{master.convertWattsToAmps(conwatts):.2f}A")
+        #debugLog(
+        #    1,
+        #    f(
+        #        "Limiting charging to {colored(generation, 'magenta')} - {colored(consumption, 'magenta')} = {colored(maxampsDisplay, 'magenta')}."
+        #    ),
+        #)
 
     else:
         # For all other modes, simply show the Amps to charge at
