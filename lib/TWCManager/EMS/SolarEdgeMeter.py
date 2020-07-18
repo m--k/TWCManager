@@ -65,7 +65,6 @@ class SolarEdgeMeter:
             print("SolarEdgeMeter: (" + str(minlevel) + ") " + message)
 
     def getConsumption(self):
-        print("SolarEdgeMeter: getConsumption() called")
         if not self.status:
             self.debugLog(1, "SolarEdgeMeter EMS Module Disabled. Skipping getConsumption")
             return 0

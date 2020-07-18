@@ -20,8 +20,8 @@
         # 100 amp breaker * 0.8 = 80 here.
         # IF YOU'RE NOT SURE WHAT TO PUT HERE, ASK THE ELECTRICIAN WHO INSTALLED YOUR
         # CHARGER.
-		# for test: only 14A
-        "wiringMaxAmpsAllTWCs": 14,
+		# for test: only 15A
+        "wiringMaxAmpsAllTWCs": 15,
 		# final installation: 16A or 32A
         #"wiringMaxAmpsAllTWCs": 16,
 
@@ -33,8 +33,8 @@
         # wiringMaxAmpsAllTWCs.
         # For example, if you have two TWCs each with a 50A breaker, set
         # wiringMaxAmpsPerTWC = 50 * 0.8 = 40 and wiringMaxAmpsAllTWCs = 40 + 40 = 80.
-        # for test: only 14A
-		"wiringMaxAmpsPerTWC": 14,
+        # for test: only 15A
+		"wiringMaxAmpsPerTWC": 15,
         # final installation: 16A or 32A
 		#"wiringMaxAmpsPerTWC": 16,
 
@@ -113,12 +113,14 @@
         # how much extra current should be drawn to keep charging?  This avoids frequently
         # stopping and starting charging on a day with variable solar output, at the cost
         # of drawing energy from sources other than solar.
-        "greenEnergyFlexAmps": 0,
+        # set to 2A*230V=460W
+        "greenEnergyFlexAmps": 2,
 
         # If the conditions for green energy briefly fail to match, how long should the
         # Track Green Energy policy continue to run?  (Mainly useful if you're adding
         # non-time-based restrictions below.)
-        #"greenEnergyLatch": 15,
+        # default:0, proposed value=15min,  for test set to 2min
+        "greenEnergyLatch": 2,
 
         # In some environments, the consumption meter value that we obtain will
         # include the charger's consumption, whilst others will not.
