@@ -12,12 +12,12 @@ class SolarEdgeMeter:
     config = None
     configConfig = None
     configSolarEdgeMeter = None
-    #consumedW = 0
+    consumedW = 0
     debugLevel = 0
     fetchFailed = False
     generatedW = 0
     #importW = 0
-    #exportW = 0
+    exportedW = 0
     lastFetch = 0
     master = None
     serverIP = None
@@ -74,9 +74,10 @@ class SolarEdgeMeter:
         # Perform updates if necessary
         self.update()
 
-        # I don't believe this is implemented
-        return float(0)    # we are measuring directly the exported energy with a SolarEdge modbus power meter. So we set always Consumption=0 and Generation=exported power
-
+        # Return generation value
+        return float(self.consumedW)
+        
+        
     def getGeneration(self):
         self.debugLog(1, "getGeneration() called")
         if not self.status:
@@ -95,18 +96,35 @@ class SolarEdgeMeter:
         if (int(self.time.time()) - self.lastFetch) > self.cacheTime:
             # Cache has expired. Fetch values from modbus
             #try:
-                # read the exported power from the meter
-                p_dict = self.meter1.read("power")   # returns a dict with one entry, not a value!
-                p = p_dict['power']             # get the value from the dict
+                # read the generated solar power from the inverter
+                gen_dict = self.inverter.read("power_ac")   # returns a dict with one entry, not a value!
+                gen = gen_dict['power_ac']             # get the value from the dict
                 # read the scale factor for the exported power from the meter
-                p_scale_dict = self.meter1.read("power_scale")   #returns a dict with one entry, not a value!
-                p_scale = p_scale_dict['power_scale']       #get the value from the dict
+                gen_scale_dict = self.inverter.read("power_ac_scale")   #returns a dict with one entry, not a value!
+                gen_scale = gen_scale_dict['power_ac_scale']       #get the value from the dict
 
-                self.generatedW = p * (10 ** p_scale)
-                self.debugLog(1, f"Einspeisung:  {self.generatedW}")
+                self.generatedW = gen * (10 ** gen_scale)
+                self.debugLog(1, f"Erzeugung:  {self.generatedW}")
+                
+                # read the exported power from the meter
+                exp_dict = self.meter1.read("power")   # returns a dict with one entry, not a value!
+                exp = exp_dict['power']             # get the value from the dict
+                # read the scale factor for the exported power from the meter
+                exp_scale_dict = self.meter1.read("power_scale")   #returns a dict with one entry, not a value!
+                exp_scale = exp_scale_dict['power_scale']       #get the value from the dict
+
+                self.exportedW = exp * (10 ** exp_scale)
+                self.debugLog(1, f"Einspeisung:  {self.exportedW}")
+                
+                self.consumedW = self.generatedW - self.exportedW
+                self.debugLog(1, f"Verbrauch:  {self.consumedW}")
+               
+                
+                
                 self.lastFetch = int(self.time.time())
             #except:
                 #self.generatedW = 0
+                #self.consumedW = 0
                 #self.debugLog(1, "Failed to values from modbus from SolarEdgeMeter")
                 return True
         else:
