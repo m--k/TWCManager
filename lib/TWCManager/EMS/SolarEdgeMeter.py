@@ -65,7 +65,6 @@ class SolarEdgeMeter:
             print("SolarEdgeMeter: (" + str(minlevel) + ") " + message)
 
     def getConsumption(self):
-        self.debugLog(1, "getConsumption() called")
         print("SolarEdgeMeter: getConsumption() called")
         if not self.status:
             self.debugLog(1, "SolarEdgeMeter EMS Module Disabled. Skipping getConsumption")
@@ -79,7 +78,6 @@ class SolarEdgeMeter:
         
         
     def getGeneration(self):
-        self.debugLog(1, "getGeneration() called")
         if not self.status:
             self.debugLog(1, "SolarEdgeMeter EMS Module Disabled. Skipping getGeneration")
             return 0
@@ -92,10 +90,9 @@ class SolarEdgeMeter:
 
   
     def update(self):
-        self.debugLog(1, "update() called")
         if (int(self.time.time()) - self.lastFetch) > self.cacheTime:
             # Cache has expired. Fetch values from modbus
-            #try:
+            try:
                 # read the generated solar power from the inverter
                 gen_dict = self.inverter.read("power_ac")   # returns a dict with one entry, not a value!
                 gen = gen_dict['power_ac']             # get the value from the dict
@@ -122,10 +119,10 @@ class SolarEdgeMeter:
                 
                 
                 self.lastFetch = int(self.time.time())
-            #except:
-                #self.generatedW = 0
-                #self.consumedW = 0
-                #self.debugLog(1, "Failed to values from modbus from SolarEdgeMeter")
+            except:
+                self.generatedW = 0
+                self.consumedW = 0
+                self.debugLog(1, "Exception: Failed to read values from modbus from SolarEdgeMeter")
                 return True
         else:
             # Cache time has not elapsed since last fetch, serve from cache.
