@@ -436,7 +436,7 @@
       # SolarEdge Meter
         "SolarEdgeMeter": {
           "enabled": true,
-          "serverIP": "192.168.178.81",   #this is the ip address of your SolarEdge inverter
+          "serverIP": "192.168.178.137",   #this is the ip address of your SolarEdge inverter
           "serverPort": "1502"            #the modbusTCP port
         }
     },

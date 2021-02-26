@@ -7,7 +7,7 @@ class SolarEdgeMeter:
     import time
     import solaredge_modbus
 
-#todo variablen prüfen
+#todo variablen prï¿½fen
     cacheTime = 10    # wait 10 seconds between modbus requests
     config = None
     configConfig = None
@@ -51,11 +51,11 @@ class SolarEdgeMeter:
         # Unload if this module is disabled or misconfigured
         if ((not self.status) or (not self.serverIP)
            or (int(self.serverPort) < 1)):
-          self.master.releaseModule("lib.TWCManager.EMS","SolarEdgeMeter");
+          self.master.releaseModule("lib.TWCManager.EMS","SolarEdgeMeter")
 		  
 		##todo try...catch
         import solaredge_modbus
-        self.inverter = solaredge_modbus.Inverter(host="192.168.178.81", port=self.serverPort)
+        self.inverter = solaredge_modbus.Inverter(host=self.serverIP, port=self.serverPort)
         self.inverter.meters()
         self.meter1 = self.inverter.meters()["Meter1"]
 
