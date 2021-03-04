@@ -21,7 +21,7 @@
         # IF YOU'RE NOT SURE WHAT TO PUT HERE, ASK THE ELECTRICIAN WHO INSTALLED YOUR
         # CHARGER.
 		# for test: only 15A
-        "wiringMaxAmpsAllTWCs": 15,
+        "wiringMaxAmpsAllTWCs": 32,
 		# final installation: 16A or 32A
         #"wiringMaxAmpsAllTWCs": 16,
 
@@ -34,7 +34,7 @@
         # For example, if you have two TWCs each with a 50A breaker, set
         # wiringMaxAmpsPerTWC = 50 * 0.8 = 40 and wiringMaxAmpsAllTWCs = 40 + 40 = 80.
         # for test: only 15A
-		"wiringMaxAmpsPerTWC": 15,
+		"wiringMaxAmpsPerTWC": 32,
         # final installation: 16A or 32A
 		#"wiringMaxAmpsPerTWC": 16,
 
@@ -69,7 +69,7 @@
         # from that standpoint.  It's not clear how much damage charging at slower
         # rates really does.
         # for testing: set min to 6A *230V = 1.38kW, later to 8 or 10A
-		"minAmpsPerTWC": 6,
+		"minAmpsPerTWC": 8,
 
         # When you have more than one vehicle associated with the Tesla car API and
         # onlyChargeMultiCarsAtHome = True, cars will only be controlled by the API when
@@ -120,7 +120,7 @@
         # Track Green Energy policy continue to run?  (Mainly useful if you're adding
         # non-time-based restrictions below.)
         # default:0, proposed value=15min,  for test set to 2min
-        "greenEnergyLatch": 2,
+        "greenEnergyLatch": 15,
 
         # In some environments, the consumption meter value that we obtain will
         # include the charger's consumption, whilst others will not.
@@ -436,7 +436,7 @@
       # SolarEdge Meter
         "SolarEdgeMeter": {
           "enabled": true,
-          "serverIP": "192.168.178.81",   #this is the ip address of your SolarEdge inverter
+          "serverIP": "192.168.178.137",   #this is the ip address of your SolarEdge inverter
           "serverPort": "1502"            #the modbusTCP port
         }
     },
