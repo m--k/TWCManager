@@ -32,7 +32,6 @@ import importlib
 import json
 import os.path
 import math
-import random
 import re
 import sys
 from termcolor import colored
@@ -42,10 +41,17 @@ from datetime import datetime
 import threading
 from ww import f
 from lib.TWCManager.TWCMaster import TWCMaster
+import requests
 
 # Define available modules for the instantiator
 # All listed modules will be loaded at boot time
+# Logging modules should be the first one to load
 modules_available = [
+    "Logging.ConsoleLogging",
+    "Logging.FileLogging",
+    "Logging.CSVLogging",
+    "Logging.MySQLLogging",
+    #    "Logging.SQLiteLogging",
     "Interface.Dummy",
     "Interface.RS485",
     "Interface.TCP",
@@ -54,17 +60,23 @@ modules_available = [
 #    "Control.WebIPCControl",
     "Control.HTTPControl",
     "Control.MQTTControl",
-#    "EMS.Enphase",
-#    "EMS.Fronius",
-#    "EMS.HASS",
-    "EMS.SolarEdge",
-#    "EMS.TeslaPowerwall2",
-#    "EMS.TED",
     "EMS.SolarEdgeMeter",
     "Logging.ConsoleLogging",
     "Logging.CSVLogging",
     "Logging.MySQLLogging",
 #    "Logging.SQLiteLogging",
+    "EMS.Enphase",
+    "EMS.Fronius",
+    "EMS.HASS",
+    "EMS.Kostal",
+    "EMS.OpenHab",
+    "EMS.SmartMe",
+    "EMS.SolarEdge",
+    "EMS.SolarEdgeMeter",
+    "EMS.SolarLog",
+    "EMS.TeslaPowerwall2",
+    "EMS.TED",
+    "EMS.Efergy",
     "Status.HASSStatus",
     "Status.MQTTStatus",
 ]
@@ -89,7 +101,7 @@ else:
 if jsonconfig:
     config = commentjson.load(jsonconfig)
 else:
-    print("Unable to find a configuration file.")
+    debugLog(1, "Unable to find a configuration file.")
     sys.exit()
 
 # All TWCs ship with a random two-byte TWCID. We default to using 0x7777 as our
@@ -113,13 +125,17 @@ fakeTWCID = bytearray(b"\x77\x77")
 
 
 def debugLog(minlevel, message):
-    if config["config"]["debugLevel"] >= minlevel:
-        print(
-            colored(master.time_now() + " ", "yellow")
-            + colored("TWCManager", "green")
-            + colored(f(" {minlevel} "), "cyan")
-            + f("{message}")
-        )
+    if master == None:
+        # It arrives only here if nothing is set
+        if config["config"]["debugLevel"] >= minlevel:
+            print(
+                colored(master.time_now() + " ", "yellow")
+                + colored("TWCManager", "green")
+                + colored(f(" {minlevel} "), "cyan")
+                + f("{message}")
+            )
+    else:
+        master.debugLog(minlevel, "TWCManager", message)
 
 
 def hex_str(s: str):
@@ -137,11 +153,15 @@ def time_now():
     )
 
 
-def unescape_msg(msg: bytearray, msgLen):
+def unescape_msg(inmsg: bytearray, msgLen):
     # Given a message received on the RS485 network, remove leading and trailing
     # C0 byte, unescape special byte values, and verify its data matches the CRC
     # byte.
-    msg = msg[0:msgLen]
+
+    # Note that a bytearray is mutable, whereas a bytes object isn't.
+    # By initializing a bytearray and concatenating the incoming bytearray
+    # to it, we protect against being passed an immutable bytes object
+    msg = bytearray() + inmsg[0:msgLen]
 
     # See notes in RS485.send() for the way certain bytes in messages are escaped.
     # We basically want to change db dc into c0 and db dd into db.
@@ -194,9 +214,12 @@ def background_tasks_thread(master):
                 carapi.setCarApiLastErrorTime(0)
                 carapi.car_api_available(task["email"], task["password"])
             elif task["cmd"] == "checkArrival":
-                carapi.applyChargeLimit(
-                    limit=carapi.lastChargeLimitApplied, checkArrival=True
+                limit = (
+                    carapi.lastChargeLimitApplied
+                    if carapi.lastChargeLimitApplied != 0
+                    else -1
                 )
+                carapi.applyChargeLimit(limit=limit, checkArrival=True)
             elif task["cmd"] == "checkCharge":
                 carapi.updateChargeAtHome()
             elif task["cmd"] == "checkDeparture":
@@ -213,6 +236,14 @@ def background_tasks_thread(master):
                 master.snapHistoryData()
             elif task["cmd"] == "updateStatus":
                 update_statuses()
+            elif task["cmd"] == "webhook":
+                if config["config"].get("webhookMethod", "POST") == "GET":
+                    requests.get(task["url"])
+                else:
+                    body = master.getStatus()
+                    requests.post(task["url"], json=body)
+            elif task["cmd"] == "saveSettings":
+                master.saveSettings()
 
         except:
             master.debugLog(
@@ -246,15 +277,22 @@ def check_green_energy():
     # in the config section at the top of this file.
     #
     greenEnergyAmpsOffset = config["config"]["greenEnergyAmpsOffset"]
-    if (greenEnergyAmpsOffset >= 0):
-        master.setConsumption("Manual", master.convertAmpsToWatts(greenEnergyAmpsOffset))
+    if greenEnergyAmpsOffset >= 0:
+        master.setConsumption(
+            "Manual", master.convertAmpsToWatts(greenEnergyAmpsOffset)
+        )
     else:
-        master.setGeneration("Manual", -1 * master.convertAmpsToWatts(greenEnergyAmpsOffset))
+        master.setGeneration(
+            "Manual", -1 * master.convertAmpsToWatts(greenEnergyAmpsOffset)
+        )
     # Poll all loaded EMS modules for consumption and generation values
     for module in master.getModulesByType("EMS"):
         master.setConsumption(module["name"], module["ref"].getConsumption())
         master.setGeneration(module["name"], module["ref"].getGeneration())
-    master.setMaxAmpsToDivideAmongSlaves(master.getMaxAmpsToDivideGreenEnergy())
+
+    # Set max amps iff charge_amps isn't specified on the policy.
+    if master.getModuleByName("Policy").policyIsGreen():
+        master.setMaxAmpsToDivideAmongSlaves(master.getMaxAmpsToDivideGreenEnergy())
 
 
 def update_statuses():
@@ -269,11 +307,9 @@ def update_statuses():
         chgwatts = master.getChargerLoad()
         debugLog(1,f("chgwatts= {chgwatts}"),)
         for module in master.getModulesByType("Logging"):
-            module["ref"].greenEnergy({
-                "genWatts": genwatts,
-                "conWatts": conwatts,
-                "chgWatts": chgwatts
-            })
+            module["ref"].greenEnergy(
+                {"genWatts": genwatts, "conWatts": conwatts, "chgWatts": chgwatts}
+            )
 
         nominalOffer = master.convertWattsToAmps(
             genwatts
@@ -318,7 +354,7 @@ def update_statuses():
             bytes("config", "UTF-8"),
             "min_amps_per_twc",
             "minAmpsPerTWC",
-            config["config"]["minAmpsPerTWC"], 
+            config["config"]["minAmpsPerTWC"],
             "A",
         )
         module["ref"].setStatus(
@@ -535,7 +571,7 @@ while True:
         if master.getModuleByName("WebIPCControl"):
             master.getModuleByName("WebIPCControl").processIPC()
 
-        # If it has been more than 2 minutes since the last kWh value, 
+        # If it has been more than 2 minutes since the last kWh value,
         # queue the command to request it from slaves
         if config["config"]["fakeMaster"] == 1 and (
             (time.time() - master.lastkWhMessage) > (60 * 2)
@@ -554,7 +590,7 @@ while True:
         timeMsgRxStart = time.time()
         while True:
             now = time.time()
-            dataLen = master.getModuleByName("RS485").getBufferLen()
+            dataLen = master.getInterfaceModule().getBufferLen()
             if dataLen == 0:
                 if msgLen == 0:
                     # No message data waiting and we haven't received the
@@ -581,7 +617,7 @@ while True:
                     continue
             else:
                 dataLen = 1
-                data = master.getModuleByName("RS485").read(dataLen)
+                data = master.getInterfaceModule().read(dataLen)
 
             if dataLen != 1:
                 # This should never happen
@@ -715,17 +751,13 @@ while True:
                 # end of the string (even without the re.MULTILINE option), and
                 # sometimes our strings do end with a newline character that is
                 # actually the CRC byte with a value of 0A or 0D.
-                msgMatch = re.search(
-                    b"^\xfd\xb1(..)\x00\x00.+\Z", msg, re.DOTALL
-                )
+                msgMatch = re.search(b"^\xfd\xb1(..)\x00\x00.+\Z", msg, re.DOTALL)
                 if msgMatch and foundMsgMatch == False:
                     # Handle acknowledgement of Start command
                     foundMsgMatch = True
                     senderID = msgMatch.group(1)
 
-                msgMatch = re.search(
-                    b"^\xfd\xb2(..)\x00\x00.+\Z", msg, re.DOTALL
-                )
+                msgMatch = re.search(b"^\xfd\xb2(..)\x00\x00.+\Z", msg, re.DOTALL)
                 if msgMatch and foundMsgMatch == False:
                     # Handle acknowledgement of Stop command
                     foundMsgMatch = True
@@ -939,15 +971,17 @@ while True:
                     data = msgMatch.group(6)
 
                     for module in master.getModulesByType("Logging"):
-                        module["ref"].slaveStatus({
-                            "TWCID": senderID,
-                            "kWh": kWh,
-                            "voltsPerPhase": [
-                                voltsPhaseA,
-                                voltsPhaseB,
-                                voltsPhaseC
-                            ]
-                        })
+                        module["ref"].slaveStatus(
+                            {
+                                "TWCID": senderID,
+                                "kWh": kWh,
+                                "voltsPerPhase": [
+                                    voltsPhaseA,
+                                    voltsPhaseB,
+                                    voltsPhaseC,
+                                ],
+                            }
+                        )
 
                     # Update the timestamp of the last reciept of this message
                     master.lastkWhMessage = time.time()
@@ -997,7 +1031,13 @@ while True:
                     if vinPart < 2:
                         vinPart += 1
                         master.getVehicleVIN(senderID, vinPart)
-                        master.queue_background_task({"cmd": "getVehicleVIN", "slaveTWC": senderID, "vinPart": str(vinPart)})
+                        master.queue_background_task(
+                            {
+                                "cmd": "getVehicleVIN",
+                                "slaveTWC": senderID,
+                                "vinPart": str(vinPart),
+                            }
+                        )
                     else:
                         slaveTWC.currentVIN = "".join(slaveTWC.VINData)
                         # Clear VIN retry timer
@@ -1149,7 +1189,7 @@ while True:
                             % (master.getkWhDelivered()),
                         )
                         # Save settings to file
-                        master.saveSettings()
+                        master.queue_background_task({"cmd": "saveSettings"})
 
                     if heartbeatData[0] == 0x07:
                         # Lower amps in use (not amps allowed) by 2 for 10
@@ -1347,7 +1387,7 @@ while True:
                                 0,
                             ),
                         )
-                        master.getModuleByName("RS485").send(
+                        master.getInterfaceModule().send(
                             bytearray(b"\xFD\xEB")
                             + fakeTWCID
                             + kWhPacked
@@ -1404,17 +1444,19 @@ while True:
                     debugLog(1, "***UNKNOWN MESSAGE from master: " + hex_str(msg))
 
     except KeyboardInterrupt:
-        print("Exiting after background tasks complete...")
+        debugLog(1, "Exiting after background tasks complete...")
         break
 
     except Exception as e:
         # Print info about unhandled exceptions, then continue.  Search for
         # 'Traceback' to find these in the log.
         traceback.print_exc()
-
+        debugLog(1, "Unhandled Exception:" + traceback.format_exc())
         # Sleep 5 seconds so the user might see the error.
         time.sleep(5)
 
+# Make sure any volatile data is written to disk before exiting
+master.queue_background_task({"cmd": "saveSettings"})
 
 # Wait for background tasks thread to finish all tasks.
 # Note that there is no such thing as backgroundTasksThread.stop(). Because we
@@ -1423,7 +1465,7 @@ while True:
 master.backgroundTasksQueue.join()
 
 # Close the input module
-master.getModuleByName("RS485").close()
+master.getInterfaceModule().close()
 
 #
 # End main program

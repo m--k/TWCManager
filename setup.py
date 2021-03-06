@@ -4,12 +4,13 @@ from setuptools import setup, find_namespace_packages
 
 setup(
     name="TWCManager",
-    version="1.2.0",
+    version="1.2.1",
     package_dir={"": "lib"},
     packages=find_namespace_packages(where="lib"),
     # Dependencies
     install_requires=[
         "commentjson>=0.8.3",
+        "jinja2==2.11.2",
         "paho_mqtt>=1.5.0",
         "pyserial>=3.4",
         "requests>=2.23.0",
@@ -17,6 +18,7 @@ setup(
         "termcolor>=1.1.0",
         "ww>=0.2.1",
         "solaredge_modbus>=0.5.0",
+        "pyModbusTCP>=0.1.8",
     ],
     # Package Metadata
     author="Nathan Gardiner",

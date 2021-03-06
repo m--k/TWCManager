@@ -13,10 +13,18 @@ class RS485:
 
     def __init__(self, master):
         self.master = master
+        classname = self.__class__.__name__
         try:
             self.debugLevel = master.config["config"]["debugLevel"]
         except KeyError:
             pass
+
+        # Unload if this module is disabled or misconfigured
+        if "interface" in master.config and classname in master.config["interface"]:
+            self.enabled = master.config["interface"][classname].get("enabled", True)
+        if not self.enabled:
+            self.master.releaseModule("lib.TWCManager.Interface", classname)
+            return None
 
         # There are two places that the baud rate for the RS485 adapter may be stored.
         # The first is the legacy configuration path, and the second is the new
@@ -41,7 +49,7 @@ class RS485:
             self.port = porta
 
         # Connect to serial port
-        self.ser = self.serial.Serial(self.port, self.baud, timeout=0)
+        self.ser = self.serial.serial_for_url(self.port, self.baud, timeout=0)
 
     def close(self):
         # Close the serial interface

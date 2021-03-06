@@ -9,6 +9,7 @@ class TWCSlave:
     import time
 
     config = None
+    configConfig = None
     debugLevel = 0
     TWCID = None
     lastVINQuery = 0
@@ -28,6 +29,7 @@ class TWCSlave:
     reportedAmpsMax = 0
     reportedAmpsActual = 0
     reportedState = 0
+    reportedAmpsLast = -1
 
     # history* vars are used to track power usage over time
     historyAvgAmps = 0
@@ -48,11 +50,11 @@ class TWCSlave:
     timeReportedAmpsActualChangedSignificantly = time.time()
 
     lastAmpsOffered = -1
+    useFlexAmpsToStartCharge = False
     timeLastAmpsOfferedChanged = time.time()
     lastHeartbeatDebugOutput = ""
     timeLastHeartbeatDebugOutput = 0
     wiringMaxAmps = 0
-    departureCheckTimes = list()
     lifetimekWh = 0
     voltsPhaseA = 0
     voltsPhaseB = 0
@@ -64,10 +66,15 @@ class TWCSlave:
 
     def __init__(self, TWCID, maxAmps, config, master):
         self.config = config
+        self.configConfig = self.config.get("config", {})
         self.master = master
         self.TWCID = TWCID
         self.maxAmps = maxAmps
-        self.wiringMaxAmps = config["config"]["wiringMaxAmpsPerTWC"]
+
+        self.wiringMaxAmps = self.configConfig.get("wiringMaxAmpsPerTWC", 6)
+        self.useFlexAmpsToStartCharge = self.configConfig.get(
+            "useFlexAmpsToStartCharge", False
+        )
 
     def print_status(self, heartbeatData):
 
@@ -142,10 +149,9 @@ class TWCSlave:
                 self.timeLastHeartbeatDebugOutput = self.time.time()
 
                 for module in self.master.getModulesByType("Logging"):
-                    module["ref"].slavePower({
-                        "TWCID": self.TWCID,
-                        "status": heartbeatData[0]
-                    })
+                    module["ref"].slavePower(
+                        {"TWCID": self.TWCID, "status": heartbeatData[0]}
+                    )
 
         except IndexError:
             # This happens if we try to access, say, heartbeatData[8] when
@@ -420,12 +426,97 @@ class TWCSlave:
             # TODO: Start and stop charging using protocol 2 commands to TWC
             # instead of car api if I ever figure out how.
             if self.lastAmpsOffered == 0 and self.reportedAmpsActual > 4.0:
-                # Car is trying to charge, so stop it via car API.
-                # car_api_charge() will prevent telling the car to start or stop
-                # more than once per minute. Once the car gets the message to
-                # stop, reportedAmpsActualSignificantChangeMonitor should drop
-                # to near zero within a few seconds.
-                self.master.stopCarsCharging()
+                now = self.time.time()
+
+                if (
+                    now - self.timeLastAmpsOfferedChanged < 60
+                    or now - self.timeReportedAmpsActualChangedSignificantly < 60
+                    or self.reportedAmpsActual < 4.0
+                ):
+                    # We want to tell the car to stop charging. However, it's
+                    # been less than a minute since we told it to charge or
+                    # since the last significant change in the car's actual
+                    # power draw or the car has not yet started to draw at least
+                    # 5 amps (telling it 5A makes it actually draw around
+                    # 4.18-4.27A so we check for self.reportedAmpsActual < 4.0).
+                    #
+                    # Once we tell the car to charge, we want to keep it going
+                    # for at least a minute before turning it off again. Concern
+                    # is that yanking the power at just the wrong time during
+                    # the start-charge negotiation could put the car into an
+                    # error state where it won't charge again without being
+                    # re-plugged. This concern is hypothetical and most likely
+                    # could not happen to a real car, but I'd rather not take
+                    # any chances with getting someone's car into a non-charging
+                    # state so they're stranded when they need to get somewhere.
+                    # Note that non-Tesla cars using third-party adapters to
+                    # plug in are at a higher risk of encountering this sort of
+                    # hypothetical problem.
+                    #
+                    # The other reason for this tactic is that in the minute we
+                    # wait, desiredAmpsOffered might rise above 5A in which case
+                    # we won't have to turn off the charger power at all.
+                    # Avoiding too many on/off cycles preserves the life of the
+                    # TWC's main power relay and may also prevent errors in the
+                    # car that might be caused by turning its charging on and
+                    # off too rapidly.
+                    #
+                    # Seeing self.reportedAmpsActual < 4.0 means the car hasn't
+                    # ramped up to whatever level we told it to charge at last
+                    # time. It may be asleep and take up to 15 minutes to wake
+                    # up, see there's power, and start charging.
+                    #
+                    # Unfortunately, self.reportedAmpsActual < 4.0 can also mean
+                    # the car is at its target charge level and may not accept
+                    # power for days until the battery drops below a certain
+                    # level. I can't think of a reliable way to detect this
+                    # case. When the car stops itself from charging, we'll see
+                    # self.reportedAmpsActual drop to near 0.0A and
+                    # heartbeatData[0] becomes 03, but we can see the same 03
+                    # state when we tell the TWC to stop charging. We could
+                    # record the time the car stopped taking power and assume it
+                    # won't want more for some period of time, but we can't
+                    # reliably detect if someone unplugged the car, drove it,
+                    # and re-plugged it so it now needs power, or if someone
+                    # plugged in a different car that needs power. Even if I see
+                    # the car hasn't taken the power we've offered for the last
+                    # hour, it's conceivable the car will reach a battery state
+                    # where it decides it wants power the moment we decide it's
+                    # safe to stop offering it. Thus, I think it's safest to
+                    # always wait until the car has taken 5A for a minute before
+                    # cutting power even if that means the car will charge for a
+                    # minute when you first plug it in after a trip even at a
+                    # time when no power should be available.
+                    #
+                    # One advantage of the above situation is that whenever you
+                    # plug the car in, unless no power has been available since
+                    # you unplugged, the charge port will turn green and start
+                    # charging for a minute. This lets the owner quickly see
+                    # that TWCManager is working properly each time they return
+                    # home and plug in.
+                    self.master.debugLog(
+                        10,
+                        "TWCSlave  ",
+                        "Don't stop charging TWC: "
+                        + self.master.hex_str(self.TWCID)
+                        + " yet because: "
+                        + "time - self.timeLastAmpsOfferedChanged "
+                        + str(int(now - self.timeLastAmpsOfferedChanged))
+                        + " < 60 or time - self.timeReportedAmpsActualChangedSignificantly "
+                        + str(
+                            int(now - self.timeReportedAmpsActualChangedSignificantly)
+                        )
+                        + " < 60 or self.reportedAmpsActual "
+                        + str(self.reportedAmpsActual)
+                        + " < 4",
+                    )
+                else:
+                    # Car is trying to charge, so stop it via car API.
+                    # car_api_charge() will prevent telling the car to start or stop
+                    # more than once per minute. Once the car gets the message to
+                    # stop, reportedAmpsActualSignificantChangeMonitor should drop
+                    # to near zero within a few seconds.
+                    self.master.stopCarsCharging()
             elif (
                 self.lastAmpsOffered >= self.config["config"]["minAmpsPerTWC"]
                 and self.reportedAmpsActual < 2.0
@@ -468,26 +559,29 @@ class TWCSlave:
         self.reportedAmpsActual = ((heartbeatData[3] << 8) + heartbeatData[4]) / 100
         self.reportedState = heartbeatData[0]
 
+        if self.reportedAmpsActual != self.reportedAmpsLast:
+            self.reportedAmpsLast = self.reportedAmpsActual
+            for module in self.master.getModulesByType("Status"):
+                module["ref"].setStatus(
+                    self.TWCID, "amps_in_use", "ampsInUse", self.reportedAmpsActual, "A"
+                )
+            self.refreshingChargerLoadStatus()
+            self.master.refreshingTotalAmpsInUseStatus()
+
         for module in self.master.getModulesByType("Status"):
             module["ref"].setStatus(
                 self.TWCID, "amps_max", "ampsMax", self.reportedAmpsMax, "A"
             )
-            module["ref"].setStatus(self.TWCID, "state", "state", self.reportedState, "")
+            module["ref"].setStatus(
+                self.TWCID, "state", "state", self.reportedState, ""
+            )
 
         # Log current history
         self.historyAvgAmps = (
             (self.historyAvgAmps * self.historyNumSamples) + self.reportedAmpsActual
         ) / (self.historyNumSamples + 1)
         self.historyNumSamples += 1
-
-        try:
-            if datetime.now().astimezone() >= self.master.nextHistorySnap:
-                self.master.queue_background_task({"cmd": "snapHistoryData"})
-        except ValueError as e:
-            self.master.debugLog(
-                10,
-                "TWCSlave  ",
-                str(e))
+        self.master.queue_background_task({"cmd": "snapHistoryData"})
 
         # self.lastAmpsOffered is initialized to -1.
         # If we find it at that value, set it to the current value reported by the
@@ -500,6 +594,7 @@ class TWCSlave:
             self.reportedAmpsActualSignificantChangeMonitor < 3
             and self.reportedAmpsActual > 3
         ):
+            self.master.getModuleByName("Policy").fireWebhook("start")
             self.master.queue_background_task({"cmd": "checkArrival"})
 
         # If power drops off, check whether a car leaves in the next little while
@@ -507,10 +602,10 @@ class TWCSlave:
             self.reportedAmpsActualSignificantChangeMonitor > 2
             and self.reportedAmpsActual < 2
         ):
-            self.departureCheckTimes = [now + 5 * 60, now + 20 * 60, now + 45 * 60]
-        if len(self.departureCheckTimes) > 0 and now >= self.departureCheckTimes[0]:
-            self.master.queue_background_task({"cmd": "checkDeparture"})
-            self.departureCheckTimes.pop(0)
+            self.master.getModuleByName("Policy").fireWebhook("stop")
+            self.master.queue_background_task({"cmd": "checkDeparture"}, 5 * 60)
+            self.master.queue_background_task({"cmd": "checkDeparture"}, 20 * 60)
+            self.master.queue_background_task({"cmd": "checkDeparture"}, 45 * 60)
 
         # Keep track of the amps the slave is actually using and the last time it
         # changed by more than 0.8A.
@@ -545,7 +640,7 @@ class TWCSlave:
         # Determine how many cars are charging and how many amps they're using
         numCarsCharging = self.master.num_cars_charging_now()
         desiredAmpsOffered = self.master.getMaxAmpsToDivideAmongSlaves()
-        flex = 0
+        flex = self.master.getAllowedFlex()
 
         if numCarsCharging > 0:
             desiredAmpsOffered -= sum(
@@ -574,7 +669,9 @@ class TWCSlave:
                 + str(desiredAmpsOffered)
                 + " with "
                 + str(numCarsCharging)
-                + " cars charging.",
+                + " cars charging and flex Amps of "
+                + str(flex)
+                + ".",
             )
 
         minAmpsToOffer = self.config["config"]["minAmpsPerTWC"]
@@ -584,7 +681,7 @@ class TWCSlave:
         if (
             desiredAmpsOffered < minAmpsToOffer
             and desiredAmpsOffered + flex >= minAmpsToOffer
-            and self.reportedAmpsActual >= 1.0
+            and (self.useFlexAmpsToStartCharge or self.reportedAmpsActual >= 1.0)
         ):
             desiredAmpsOffered = minAmpsToOffer
 
@@ -592,10 +689,13 @@ class TWCSlave:
             self.master.debugLog(
                 10,
                 "TWCSlave  ",
-                "desiredAmpsOffered ("
+                "desiredAmpsOffered: "
                 + str(desiredAmpsOffered)
-                + ") < minAmpsToOffer:"
-                + str(minAmpsToOffer),
+                + " < minAmpsToOffer: "
+                + str(minAmpsToOffer)
+                + " (flexAmps: "
+                + str(flex)
+                + ")",
             )
             if numCarsCharging > 0:
                 if (
@@ -676,89 +776,15 @@ class TWCSlave:
                     )
                     desiredAmpsOffered = 0
 
-                if self.lastAmpsOffered > 0 and (
-                    now - self.timeLastAmpsOfferedChanged < 60
-                    or now - self.timeReportedAmpsActualChangedSignificantly < 60
-                    or self.reportedAmpsActual < 4.0
-                ):
-                    # We were previously telling the car to charge but now we want
-                    # to tell it to stop. However, it's been less than a minute
-                    # since we told it to charge or since the last significant
-                    # change in the car's actual power draw or the car has not yet
-                    # started to draw at least 5 amps (telling it 5A makes it
-                    # actually draw around 4.18-4.27A so we check for
-                    # self.reportedAmpsActual < 4.0).
-                    #
-                    # Once we tell the car to charge, we want to keep it going for
-                    # at least a minute before turning it off again. concern is that
-                    # yanking the power at just the wrong time during the
-                    # start-charge negotiation could put the car into an error state
-                    # where it won't charge again without being re-plugged. This
-                    # concern is hypothetical and most likely could not happen to a
-                    # real car, but I'd rather not take any chances with getting
-                    # someone's car into a non-charging state so they're stranded
-                    # when they need to get somewhere. Note that non-Tesla cars
-                    # using third-party adapters to plug in are at a higher risk of
-                    # encountering this sort of hypothetical problem.
-                    #
-                    # The other reason for this tactic is that in the minute we
-                    # wait, desiredAmpsOffered might rise above 5A in which case we
-                    # won't have to turn off the charger power at all. Avoiding too
-                    # many on/off cycles preserves the life of the TWC's main power
-                    # relay and may also prevent errors in the car that might be
-                    # caused by turning its charging on and off too rapidly.
-                    #
-                    # Seeing self.reportedAmpsActual < 4.0 means the car hasn't
-                    # ramped up to whatever level we told it to charge at last time.
-                    # It may be asleep and take up to 15 minutes to wake up, see
-                    # there's power, and start charging.
-                    #
-                    # Unfortunately, self.reportedAmpsActual < 4.0 can also mean the
-                    # car is at its target charge level and may not accept power for
-                    # days until the battery drops below a certain level. I can't
-                    # think of a reliable way to detect this case. When the car
-                    # stops itself from charging, we'll see self.reportedAmpsActual
-                    # drop to near 0.0A and heartbeatData[0] becomes 03, but we can
-                    # see the same 03 state when we tell the TWC to stop charging.
-                    # We could record the time the car stopped taking power and
-                    # assume it won't want more for some period of time, but we
-                    # can't reliably detect if someone unplugged the car, drove it,
-                    # and re-plugged it so it now needs power, or if someone plugged
-                    # in a different car that needs power. Even if I see the car
-                    # hasn't taken the power we've offered for the
-                    # last hour, it's conceivable the car will reach a battery state
-                    # where it decides it wants power the moment we decide it's safe
-                    # to stop offering it. Thus, I think it's safest to always wait
-                    # until the car has taken 5A for a minute before cutting power
-                    # even if that means the car will charge for a minute when you
-                    # first plug it in after a trip even at a time when no power
-                    # should be available.
-                    #
-                    # One advantage of the above situation is that whenever you plug
-                    # the car in, unless no power has been available since you
-                    # unplugged, the charge port will turn green and start charging
-                    # for a minute. This lets the owner quickly see that TWCManager
-                    # is working properly each time they return home and plug in.
-                    self.master.debugLog(
-                        10,
-                        "TWCSlave  ",
-                        "Don't stop charging TWC: "
-                        + self.master.hex_str(self.TWCID)
-                        + " yet because: "
-                        + "time - self.timeLastAmpsOfferedChanged "
-                        + str(int(now - self.timeLastAmpsOfferedChanged))
-                        + " < 60 or time - self.timeReportedAmpsActualChangedSignificantly "
-                        + str(
-                            int(now - self.timeReportedAmpsActualChangedSignificantly)
-                        )
-                        + " < 60 or self.reportedAmpsActual "
-                        + str(self.reportedAmpsActual)
-                        + " < 4",
-                    )
-                    if self.master.getMaxAmpsToDivideAmongSlaves() < 1:
-                        desiredAmpsOffered = 0
-                    else:
-                        desiredAmpsOffered = minAmpsToOffer
+            else:
+                # no cars are charging, and desiredAmpsOffered < minAmpsToOffer
+                # so we need to set desiredAmpsOffered to 0
+                self.master.debugLog(
+                    10,
+                    "TWCSlave  ",
+                    "no cars charging, setting desiredAmpsOffered to 0",
+                )
+                desiredAmpsOffered = 0
         else:
             # We can tell the TWC how much power to use in 0.01A increments, but
             # the car will only alter its power in larger increments (somewhere
@@ -827,7 +853,7 @@ class TWCSlave:
                     # a higher one less than spikeAmpsToCancel6ALimit.
                     (
                         desiredAmpsOffered < self.master.getSpikeAmps()
-                        and desiredAmpsOffered > self.lastAmpsOffered
+                        and desiredAmpsOffered > self.reportedAmpsMax
                     )
                     or (
                         # ...or if we've been offering the car more amps than it's
@@ -1052,8 +1078,53 @@ class TWCSlave:
 
     def setLifetimekWh(self, kwh):
         self.lifetimekWh = kwh
+        # Publish Lifetime kWh Value via Status modules
+        for module in self.master.getModulesByType("Status"):
+            module["ref"].setStatus(
+                self.TWCID, "lifetime_kwh", "lifetimekWh", self.lifetimekWh, "kWh"
+            )
 
     def setVoltage(self, pa, pb, pc):
         self.voltsPhaseA = pa
         self.voltsPhaseB = pb
         self.voltsPhaseC = pc
+        # Publish phase 1, 2 and 3 values via Status modules
+        for phase in ("A", "B", "C"):
+            for module in self.master.getModulesByType("Status"):
+                module["ref"].setStatus(
+                    self.TWCID,
+                    "voltage_phase_" + phase.lower(),
+                    "voltagePhase" + phase,
+                    getattr(self, "voltsPhase" + phase, 0),
+                    "V",
+                )
+        self.refreshingChargerLoadStatus()
+
+    def refreshingChargerLoadStatus(self):
+        for module in self.master.getModulesByType("Status"):
+            module["ref"].setStatus(
+                self.TWCID,
+                "charger_load_w",
+                "chargerLoadInW",
+                int(self.getCurrentChargerLoad()),
+                "W",
+            )
+
+    def getCurrentChargerLoad(self):
+        return self.master.convertAmpsToWatts(
+            self.reportedAmpsActual
+        ) * self.master.getRealPowerFactor(self.reportedAmpsActual)
+
+    def getLastVehicle(self):
+        currentVehicle = None
+        lastVehicle = None
+        for vehicle in self.master.getModuleByName("TeslaAPI").getCarApiVehicles():
+            if self.currentVIN == vehicle.VIN:
+                currentVehicle = vehicle
+            if self.lastVIN == vehicle.VIN:
+                lastVehicle = vehicle
+        if currentVehicle != None:
+            return currentVehicle
+        if lastVehicle != None:
+            return lastVehicle
+        return None

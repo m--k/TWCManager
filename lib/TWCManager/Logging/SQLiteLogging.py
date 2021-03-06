@@ -1,12 +1,16 @@
 # SQLiteLogging module. Provides output to SQLite Database for regular stats
 
+
 class SQLiteLogging:
 
-    config        = None
-    configConfig  = None
+    capabilities = {
+      "queryGreenEnergy": False
+    }
+    config = None
+    configConfig = None
     configLogging = None
-    db            = None
-    status        = False
+    db = None
+    status = False
 
     def __init__(self, master):
         self.master = master
@@ -22,16 +26,17 @@ class SQLiteLogging:
         self.status = self.configLogging.get("enabled", False)
 
         # Unload if this module is disabled or misconfigured
-        if (not self.status or not self.configLogging.get("path", None)):
-          self.master.releaseModule("lib.TWCManager.Logging","SQLiteLogging");
-          return None
+        if not self.status or not self.configLogging.get("path", None):
+            self.master.releaseModule("lib.TWCManager.Logging", "SQLiteLogging")
+            return None
 
         # Import sqlite module if module is not released
         import sqlite3
+
         self.db = sqlite3.connect(self.configLogging["path"])
 
         # Check if the database schema has been applied
-        if (not self.checkTable("charge_sessions")):
+        if not self.checkTable("charge_sessions"):
             self.createSchema()
 
     def checkTable(self, tableName):
@@ -58,6 +63,16 @@ class SQLiteLogging:
           );
         """
 
+    def debugLog(self, logdata):
+        # debugLog is something of a catch-all if we don't have a specific
+        # logging function for the given data. It allows a log entry to be
+        # passed to us for storage.
+        return
+
+    def getCapabilities(self, capability):
+        # Allows query of module capabilities when deciding which Logging module to use
+        return self.capabilities.get(capability, False)
+
     def slavePower(self, data):
         # Not Yet Implemented
         return None
@@ -69,10 +84,11 @@ class SQLiteLogging:
     def startChargeSession(self, data):
         # Called when a Charge Session Starts.
         twcid = "%02X%02X" % (data["TWCID"][0], data["TWCID"][0])
-        query = "INSERT INTO charge_sessions (startTime, startkWh, TWCID) values (?,?,?)"
+        query = (
+            "INSERT INTO charge_sessions (startTime, startkWh, TWCID) values (?,?,?)"
+        )
         cur = self.db.cursor()
-        cur.execute(query, (data.get("startTime", 0),
-           data.get("startkWh", 0), twcid))
+        cur.execute(query, (data.get("startTime", 0), data.get("startkWh", 0), twcid))
         cur.close()
 
     def stopChargeSession(self, data):
@@ -80,8 +96,7 @@ class SQLiteLogging:
         twcid = "%02X%02X" % (data["TWCID"][0], data["TWCID"][0])
         query = "UPDATE charge_sessions SET endTime = ?, endkWh = ? WHERE TWCID = ?"
         cur = self.db.cursor()
-        cur.execute(query, (data.get("endTime", 0),
-           data.get("endkWh", 0), twcid))
+        cur.execute(query, (data.get("endTime", 0), data.get("endkWh", 0), twcid))
         cur.close()
 
     def updateChargeSession(self, data):

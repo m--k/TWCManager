@@ -25,17 +25,18 @@ The following table shows the available configuration parameters for the HASS EM
 | hassEntityGeneration  | *optional* Name of HASS Generation Sensor. |
 | serverIP    | *required* The IP address of the HomeAssistant instance. We will poll the REST HTTP API. |
 | serverPort  | *optional* HASS port. This is the port that we should connect to. Defaults to 8123 (HTTP). |
+| useHttps    | *optional* Boolean value, ```true``` or ```false```. Should it the call use https instead of http. |
 
 ### JSON Configuration Example
 
 ```
-"Fronius": {
+"HASS": {
   "apiKey": "ABC123",
   "enabled": true,
   "hassEntityConsumption": "sensor.consumption",
   "hassEntityGeneration": "sensor.generation",
   "serverIP": "192.168.1.2",
-  "serverPort": 80
+  "serverPort": 8123
 }
 ```
 

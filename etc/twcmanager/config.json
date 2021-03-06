@@ -90,6 +90,13 @@
         "defaultVoltage": 230,
         "numberOfPhases": 1,
 
+        # As I observed different reactive power changing with the the amps used,
+        # I introduce a real power variable for minAmps and maxAmps
+        # For my installation there was 0.90 at 6 amps and 0.93 at 20 amps. 
+        # You can comment that in, if you want to try this.        
+        # "realPowerFactorMinAmps": 0.9,
+        # "realPowerFactorMaxAmps": 0.93,
+
         # When determining how much green energy is available for charging, we count
         # greenEnergyAmpsOffset as consumption. This is most often given a value
         # equal to the average amount of power consumed by everything other than car
@@ -115,6 +122,10 @@
         # of drawing energy from sources other than solar.
         # set to 2A*230V=460W
         "greenEnergyFlexAmps": 2,
+
+        # If you want to use start charging with greenEnergyFlexAmps as it delays stopping
+        # you have to set this config to true
+        "useFlexAmpsToStartCharge": false,
 
         # If the conditions for green energy briefly fail to match, how long should the
         # Track Green Energy policy continue to run?  (Mainly useful if you're adding
@@ -166,6 +177,10 @@
 
         # Choose whether to display milliseconds after time on each line of debug info.
         "displayMilliseconds": false,
+
+        # Webhooks can be triggered using either GET or POST methods.
+        # By default, they receive a POST of the current status; uncomment for GET.
+        #"webhookMethod": "GET",
 
         # Normally we fake being a TWC Master using fakeMaster = 1.
         # Two other settings are available, but are only useful for debugging and
@@ -275,6 +290,19 @@
             #  "condition":[],
             #  "value":[]
             #},
+        },
+
+        # This permits defining webhooks for the built-in policies
+        "webhooks": {
+          #"Scheduled Charging": {
+          #  "enter": "http://ift.tt/your_url_here",
+          #  "start": "http://ift.tt/your_url_here",
+          #  "stop": "http://ift.tt/your_url_here",
+          #  "exit": "http://ift.tt/your_url_here"
+          #}
+          #"Track Green Energy": etc.
+          #"Charge Now": etc.
+          #"Non Scheduled Charging": etc.
         }
       },
       # NOTE: Override and Extend are mutually exclusive options. Once you override, you
@@ -314,14 +342,6 @@
       #   "charge_amps": "settings.nonScheduledAmpsMax",
       #   "charge_limit": "config.nonScheduledLimit" },
 
-      # { "name": "Track Green Energy",
-      #   "match": ["settings.nonScheduledAction"],
-      #   "condition": ["eq"],
-      #   "value": [3],
-      #   "background_task": "checkGreenEnergy",
-      #   "allowed_flex": "config.greenEnergyFlexAmps",
-      #   "charge_limit": "config.greenEnergyLimit" }
-
       ]
     },
     "logging":{
@@ -332,6 +352,26 @@
         # to reduce write cycles.
         "Console": {
             "enabled": true
+        },
+        "FileLogger": {
+          "enabled": false,
+          # The path under which the various log files will be stored.
+          # Make sure the user which runs the TWCManager process can write to
+          # this directory.
+          "path": "/etc/twcmanager/log",
+          # The mute parameter allows turning specific logging on or off.
+          # In the example below, charge sessions are logged, but not the
+          # regular charger status messages. These are valid under any of the
+          # logging modules
+          # For the debug output, you can mute Log Levels greater than the 
+          # value specified here.
+          "mute":{
+              "ChargeSessions": false,
+              "GreenEnergy": false,
+              "SlavePower": false,
+              "SlaveStatus": false,
+              "DebugLogLevelGreaterThan": 1
+          }                 
         },
         "CSV": {
             "enabled": true,
@@ -345,9 +385,9 @@
             # logging modules
             "mute":{
                 "ChargeSessions": false,
-                "GreenEnergy": false,
-                "SlavePower": false,
-                "SlaveStatus": false
+                "GreenEnergy": true,
+                "SlavePower": true,
+                "SlaveStatus": true,
             }
         },
         "MySQL": {
@@ -373,9 +413,20 @@
         # useful if you have one interface that provides generation detail and another that provides consumption
         # detail, but if both systems provided both values, it would be duplicated.
         "Enphase": {
+            "enabled": false,
+
+            # Note that Enphase is an either/or, either Cloud or Local
+            # Enabling both of these sections will not give you the intended
+            # outcome.
+            #
+            # Cloud API:
             "apiKey": "ABC123",
             "systemID": "12345",
             "userID": "4d6a51330a"
+            # Local API:
+            #"serverIP": "192.168.1.2",
+            #"serverPort": 80
+
         },
         "Fronius": {
             "enabled": false,
@@ -388,6 +439,7 @@
       # The IP address and port of the HomeAssistant front-end
             "serverIP": "192.168.1.1",
             "serverPort": "8123",
+            "useHttps": false,            
 
       # To obtain a HASS API key, via browser, click on your user profile, and
       # add a Long-Lived Access Token. Place it in the following variable:
@@ -411,13 +463,19 @@
         "Powerwall2": {
           "enabled": false,
           "serverIP": "192.168.1.2",
-      # Password is optional. Specify it if authentication is enabled.
+      # Password is required starting in firmware 20.49.0
           "password": "test123",
       # The following value specifies the minimum battery level of the 
       # Powerwall2 before the car will be able to charge. This avoids a
       # situation where the battery level is low due to low generation, and the
       # battery is then further depleted by the vehicle charging.
           "minBatteryLevel": 90
+        },
+        "SmartMe": {
+          "enabled": false,
+          "username": "username",
+          "password": "password",
+          "serialNumber": "ABC1234"
         },
       # SolarEdge API, consumed from the internet-based SolarEdge Potal
         "SolarEdge": {
@@ -427,6 +485,12 @@
       # Site ID defines which system to monitor
           "siteID": "1597012"
         },
+      # SolarLog Inverters
+        "SolarLog": {
+          "enabled": false,
+          "serverIP": "192.168.1.2",
+          "excludeConsumptionInverters": [ 2 ] #Array of indices of reading devices - to exclude consumption from. Needed if e.g. a boiler only heats with solar overhead - and you want to override this one.
+        },        
       # The energy detective
         "TED": {
           "enabled": false,
@@ -438,17 +502,47 @@
           "enabled": true,
           "serverIP": "192.168.178.137",   #this is the ip address of your SolarEdge inverter
           "serverPort": "1502"            #the modbusTCP port
+        },
+      # The openHAB module allows fetching of consumption and generation data from openHAB items.
+      # If you do not track one of these values (generation or consumption) via openHAB, leave the parameter blank, and it will not be retrieved.
+        "openHAB": {
+          "enabled": false,
+          "consumptionItem": "Consumption item name",
+          "generationItem": "Generation item name",
+          "serverIP": "192.168.1.2",
+          "serverPort": "8080"
+        },
+      # The Efergy server allows fetching of consumption from https://engage.efergy.com/ token is needed
+        "Efergy": {
+            "enabled": false,
+            "token": "xx"
         }
+
     },
 
     # Status plugins allow us to export status detail out of TWCManager.
     # This will use interfaces such as MQTT or HomeAssistant API to update status for charging, power draw, etc.
     "status": {
         "HASS": {
-       # Enabling the HASS status plugin will push TWCManager sensor values to a HomeAssistant server.
+      # Enabling the HASS status plugin will push TWCManager sensor values to a HomeAssistant server.
             "enabled": false,
             "serverIP": "192.168.1.1",
             "serverPort": "8123",
+            "useHttps": false,
+      
+      # Perform rate limiting first (as there are some very chatty topics).
+      # For each message that comes through, we take the sensor name and check
+      # when we last updated it. If it was less than msgRateInSeconds
+      # seconds ago, we send it later.
+            "msgRateInSeconds": 60,
+      
+      # Resends the last sensor value at least once every resendRateInSeconds, 
+      # so HASS does not forget the value ;-)
+            "resendRateInSeconds": 3600,
+      
+      # In case of errors, after how many seconds it the logic should try to resend
+      # the status
+            "retryRateInSeconds": 60,
 
       # To obtain a HASS API key, via browser, click on your user profile, and
       # add a Long-Lived Access Token. Place it in the following variable:

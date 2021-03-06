@@ -8,7 +8,7 @@ class Policy:
     active_policy = None
 
     # This is the default charge policy.  It can be overridden or extended.
-    charge_policy = [
+    default_policy = [
         # The first policy table entry is for chargeNow. This will fire if
         # chargeNowAmps is set to a positive integer and chargeNowTimeEnd
         # is less than or equal to the current timestamp
@@ -73,6 +73,7 @@ class Policy:
             "charge_limit": "config.greenEnergyLimit",
         },
     ]
+    charge_policy = default_policy[:]
     lastPolicyCheck = 0
     limitOverride = False
     master = None
@@ -96,13 +97,14 @@ class Policy:
                 for (name, restrictions) in config_extend.get(
                     "restrictions", {}
                 ).items():
-                    restricted = next(
-                        policy
-                        for policy in self.charge_policy
-                        if policy["name"] == name
-                    )
+                    restricted = self.getPolicyByName(name)
                     for key in ("match", "condition", "value"):
                         restricted[key] += restrictions.get(key, [])
+
+                # Get webhooks
+                for (name, hooks) in config_extend.get("webhooks", {}).items():
+                    hooked = self.getPolicyByName(name)
+                    hooked["webhooks"] = hooks
 
                 # Green Energy Latching
                 if "greenEnergyLatch" in self.config["config"]:
@@ -167,9 +169,7 @@ class Policy:
                 # Now, finish processing
                 return
             else:
-                self.master.debugLog(
-                    8, "Policy", "Policy conditions were not matched."
-                )
+                self.master.debugLog(8, "Policy", "Policy conditions were not matched.")
                 continue
 
         # No policy has matched; keep the current policy
@@ -177,6 +177,8 @@ class Policy:
 
     def enforcePolicy(self, policy, updateLatch=False):
         if self.active_policy != str(policy["name"]):
+            self.fireWebhook("exit")
+
             self.master.debugLog(
                 1,
                 "Policy",
@@ -184,6 +186,7 @@ class Policy:
             )
             self.active_policy = str(policy["name"])
             self.limitOverride = False
+            self.fireWebhook("enter")
 
         if updateLatch and "latch_period" in policy:
             policy["__latchTime"] = time.time() + policy["latch_period"] * 60
@@ -214,16 +217,24 @@ class Policy:
             self.master.queue_background_task({"cmd": bgt})
 
         # If a charge limit is defined for this policy, apply it
-        limit = None
+        limit = limit = self.policyValue(policy.get("charge_limit", -1))
         if self.limitOverride:
-            limit = self.master.getModuleByName("TeslaAPI").minBatteryLevelAtHome - 1
-            if limit < 50:
-                limit = 50
-        else:
-            limit = self.policyValue(policy.get("charge_limit", -1))
+            currentCharge = (
+                self.master.getModuleByName("TeslaAPI").minBatteryLevelAtHome - 1
+            )
+            if currentCharge < 50:
+                currentCharge = 50
+            limit = currentCharge if limit == -1 else min(limit, currentCharge)
         if not (limit >= 50 and limit <= 100):
             limit = -1
         self.master.queue_background_task({"cmd": "applyChargeLimit", "limit": limit})
+
+    def fireWebhook(self, hook):
+        policy = self.getPolicyByName(self.active_policy)
+        if policy:
+            url = policy.get("webhooks", {}).get(hook, None)
+            if url:
+                self.master.queue_background_task({"cmd": "webhook", "url": url})
 
     def getPolicyByName(self, name):
         for policy in self.charge_policy:
@@ -245,9 +256,9 @@ class Policy:
         if value == "now":
             return time.time()
 
-        # If value is "tm_hour", substitute with current hour
-        if value == "tm_hour":
-            return ltNow.tm_hour
+        # If value is "tm_*", substitute with time component
+        if value.startswith("tm_") and hasattr(ltNow, value):
+            return getattr(ltNow, value)
 
         # The remaining checks are case-sensitive!
         #
@@ -277,44 +288,48 @@ class Policy:
         return value
 
     def policyIsGreen(self):
-        if (self.getPolicyByName(self.active_policy)):
-          return self.getPolicyByName(self.active_policy).get("background_task", "") == "checkGreenEnergy"
-        return 0
+        current = self.getPolicyByName(self.active_policy)
+        if current:
+            return (
+                current.get("background_task", "") == "checkGreenEnergy" and
+                current.get("charge_amps", None) == None
+            )
+        return False
 
     def doesConditionMatch(self, match, condition, value, exitOn):
+        matchValue = self.policyValue(match)
+        value = self.policyValue(value)
+
         self.master.debugLog(
             8,
             "Policy",
             f(
-                "Evaluating Policy match ({colored(match, 'red')}), condition ({colored(condition, 'red')}), value ({colored(value, 'red')})"
+                "Evaluating Policy match ({colored(match, 'red')} [{matchValue}]), condition ({colored(condition, 'red')}), value ({colored(value, 'red')})"
             ),
         )
 
-        match = self.policyValue(match)
-        value = self.policyValue(value)
-
-        if all([isinstance(a, list) for a in (match, condition, value)]):
-            return self.checkConditions(match, condition, value, not exitOn)
+        if all([isinstance(a, list) for a in (matchValue, condition, value)]):
+            return self.checkConditions(matchValue, condition, value, not exitOn)
 
         # Perform comparison
         if condition == "gt":
             # Match must be greater than value
-            return True if match > value else False
+            return True if matchValue > value else False
         elif condition == "gte":
             # Match must be greater than or equal to value
-            return True if match >= value else False
+            return True if matchValue >= value else False
         elif condition == "lt":
             # Match must be less than value
-            return True if match < value else False
+            return True if matchValue < value else False
         elif condition == "lte":
             # Match must be less than or equal to value
-            return True if match <= value else False
+            return True if matchValue <= value else False
         elif condition == "eq":
             # Match must be equal to value
-            return True if match == value else False
+            return True if matchValue == value else False
         elif condition == "ne":
             # Match must not be equal to value
-            return True if match != value else False
+            return True if matchValue != value else False
         elif condition == "false":
             # Condition: false is a method to ensure a policy entry
             # is never matched, possibly for testing purposes
@@ -332,7 +347,7 @@ class Policy:
             if self.doesConditionMatch(match, condition, value, exitOn) == exitOn:
                 return exitOn
         return not exitOn
-    
+
     def overrideLimit(self):
         self.limitOverride = True
 
