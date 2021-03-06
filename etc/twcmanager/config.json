@@ -20,9 +20,9 @@
         # 100 amp breaker * 0.8 = 80 here.
         # IF YOU'RE NOT SURE WHAT TO PUT HERE, ASK THE ELECTRICIAN WHO INSTALLED YOUR
         # CHARGER.
-		# for test: only 15A
+        # for test: only 15A
         "wiringMaxAmpsAllTWCs": 32,
-		# final installation: 16A or 32A
+        # final installation: 16A or 32A
         #"wiringMaxAmpsAllTWCs": 16,
 
         # If all your chargers share a single circuit breaker, set wiringMaxAmpsPerTWC
@@ -34,9 +34,9 @@
         # For example, if you have two TWCs each with a 50A breaker, set
         # wiringMaxAmpsPerTWC = 50 * 0.8 = 40 and wiringMaxAmpsAllTWCs = 40 + 40 = 80.
         # for test: only 15A
-		"wiringMaxAmpsPerTWC": 32,
+        "wiringMaxAmpsPerTWC": 32,
         # final installation: 16A or 32A
-		#"wiringMaxAmpsPerTWC": 16,
+        #"wiringMaxAmpsPerTWC": 16,
 
         # https://teslamotorsclub.com/tmc/threads/model-s-gen2-charger-efficiency-testing.78740/#post-1844789
         # says you're using 10.85% more power (91.75/82.77=1.1085) charging at 5A vs 40A,
@@ -69,7 +69,7 @@
         # from that standpoint.  It's not clear how much damage charging at slower
         # rates really does.
         # for testing: set min to 6A *230V = 1.38kW, later to 8 or 10A
-		"minAmpsPerTWC": 8,
+        "minAmpsPerTWC": 8,
 
         # When you have more than one vehicle associated with the Tesla car API and
         # onlyChargeMultiCarsAtHome = True, cars will only be controlled by the API when
@@ -114,7 +114,7 @@
         # If you are able to obtain consumption details from an energy management system,
         # this value can be set to 0 unless you wish to manually adjust what it returns.
         # todo: later define an offset of e.g. 500W
-		"greenEnergyAmpsOffset": 0,
+        "greenEnergyAmpsOffset": 0,
 
         # If green energy dips below the target charge amount while already charging,
         # how much extra current should be drawn to keep charging?  This avoids frequently
@@ -439,7 +439,7 @@
       # The IP address and port of the HomeAssistant front-end
             "serverIP": "192.168.1.1",
             "serverPort": "8123",
-            "useHttps": false,            
+            "useHttps": false,
 
       # To obtain a HASS API key, via browser, click on your user profile, and
       # add a Long-Lived Access Token. Place it in the following variable:
@@ -465,7 +465,7 @@
           "serverIP": "192.168.1.2",
       # Password is required starting in firmware 20.49.0
           "password": "test123",
-      # The following value specifies the minimum battery level of the 
+      # The following value specifies the minimum battery level of the
       # Powerwall2 before the car will be able to charge. This avoids a
       # situation where the battery level is low due to low generation, and the
       # battery is then further depleted by the vehicle charging.
@@ -490,7 +490,7 @@
           "enabled": false,
           "serverIP": "192.168.1.2",
           "excludeConsumptionInverters": [ 2 ] #Array of indices of reading devices - to exclude consumption from. Needed if e.g. a boiler only heats with solar overhead - and you want to override this one.
-        },        
+        },
       # The energy detective
         "TED": {
           "enabled": false,
