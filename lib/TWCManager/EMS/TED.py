@@ -46,19 +46,14 @@ class TED:
         self.serverPort = self.configTED.get("serverPort", "80")
 
         # Unload if this module is disabled or misconfigured
-        if ((not self.status) or (not self.serverIP)
-            or (int(self.serverPort) < 1)):
-            self.master.releaseModule("lib.TWCManager.EMS","TED");
+        if (not self.status) or (not self.serverIP) or (int(self.serverPort) < 1):
+            self.master.releaseModule("lib.TWCManager.EMS", "TED")
             return None
-
-    def debugLog(self, minlevel, message):
-        if self.debugLevel >= minlevel:
-            print("TED: (" + str(minlevel) + ") " + message)
 
     def getConsumption(self):
 
         if not self.status:
-            self.debugLog(10, "TED EMS Module Disabled. Skipping getConsumption")
+            self.master.debugLog(10, "TED", "TED EMS Module Disabled. Skipping getConsumption")
             return 0
 
         # Perform updates if necessary
@@ -70,7 +65,7 @@ class TED:
     def getGeneration(self):
 
         if not self.status:
-            self.debugLog(10, "TED EMS Module Disabled. Skipping getGeneration")
+            self.master.debugLog(10, "TED", "TED EMS Module Disabled. Skipping getGeneration")
             return 0
 
         # Perform updates if necessary
@@ -87,8 +82,8 @@ class TED:
         try:
             r = self.requests.get(url, timeout=self.timeout)
         except self.requests.exceptions.ConnectionError as e:
-            self.debugLog(4, "Error connecting to TED to fetch solar data")
-            self.debugLog(10, str(e))
+            self.master.debugLog(4, "TED", "Error connecting to TED to fetch solar data")
+            self.master.debugLog(10, "TED", str(e))
             self.fetchFailed = True
             return False
 
@@ -110,7 +105,7 @@ class TED:
                     b"^Solar,[^,]+,-?([^, ]+),", value, self.re.MULTILINE
                 )
             else:
-                self.debugLog(5, "Failed to find value in response from TED")
+                self.master.debugLog(5, "TED", "Failed to find value in response from TED")
                 self.fetchFailed = True
 
             if m:

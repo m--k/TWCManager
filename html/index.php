@@ -7,10 +7,6 @@
     // 1 is just the most useful info.
     // 10 is all info.
     $debugLevel = 0;
-
-    // Point $twcScriptDir to the directory containing the TWCManager.py script.
-    // Interprocess Communication with TWCManager.py will not work if this
-    // parameter is incorrect.
     $twcScriptDir = "/etc/twcmanager";
 
     // End configuration parameters
@@ -285,6 +281,18 @@
         }
     }
 ?>
+<h1>Note</h1>
+
+Thanks for using TWCManager, we hope you are finding this project useful.
+
+<p>This web interface is scheduled for eventual deprecation. We retain it for the components that have not yet been migrated to the new web interface, and for backwards compatibility with other TWCManager forks.
+
+<p>The defaults for the Web IPC Control Module have changed, disabling the module by default in v1.2.1. If you need to use the legacy web interface, please read the documentation <a href="https://github.com/ngardiner/TWCManager/blob/v1.2.1/docs/modules/Control_WebIPC.md">here</a> for details on what you need to configure.
+
+<p>We strongly recommend using the <a href="https://github.com/ngardiner/TWCManager/blob/v1.2.1/docs/modules/Control_HTTP.md">New Web Interface</a>. Feature partiy in the new web interface is a high priority goal of v1.2.1.
+
+<hr />
+
 <form action="index.php" name="refresh" method="get">
     <table border="0" padding="0" margin="0"><tr>
         <td valign="top">
@@ -386,27 +394,11 @@
                 }
 
                 if($twcModelMaxAmps < 40) {
-                    // The last TWC in the list reported supporting under 40
-                    // total amps. Assume this is a 32A EU TWC and offer
-                    // appropriate values. You can add or remove values, just
-                    // make sure they are whole numbers between 5 and
-                    // $twcModelMaxAmps.
-                    // Nietschy pointed out that his car was limited to 16A by
-                    // onboard chargers, but setting the TWC to 16A leads to
-                    // 15.7A actual usage.  When set to 17A, the car is able to
-                    // draw a little more power, so we offer 17A instead of 16A
-                    // below.
                     $use24HourTime = true;
-                    $aryStandardAmps = array(
-                                            '6A' => '6',
-                                            '8A' => '8',
-                                            '10A' => '10',
-                                            '13A' => '13',
-                                            '17A' => '17',
-                                            '21A' => '21',
-                                            '25A' => '25',
-                                            '32A' => '32',
-                                        );
+                    $aryStandardAmps = array();
+                    for ($i = 6; $i <= 32; $i++) {
+                        $aryStandardAmps[strval($i).'A'] = strval($i);
+                    }
                 }
                 else {
                     // Offer values appropriate for an 80A North American TWC
@@ -512,7 +504,7 @@
         <p id="resumeGreen" style="margin-top:0.3em">
             <strong>Resume 'Track green energy' at:</strong>
             <?php
-            DisplaySelect('resumeTrackGreenEnergyTime', '', array_merge(array('Never' => '-1:00'),
+            DisplaySelect('resumeTrackGreenEnergyTime', '', array_merge(array('Never' => '23:59'),
                                                                              $aryHours));
             ?>
         </p>

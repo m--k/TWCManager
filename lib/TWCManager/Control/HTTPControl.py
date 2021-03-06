@@ -1,7 +1,11 @@
+import mimetypes
+import os
+import pathlib
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from termcolor import colored
 from datetime import datetime, timedelta
+import jinja2
 import json
 import re
 import threading
@@ -16,10 +20,8 @@ class ThreadingSimpleServer(ThreadingMixIn, HTTPServer):
 
 
 class HTTPControl:
-
     configConfig = {}
     configHTTP = {}
-    debugLevel = 1
     httpPort = 8080
     master = None
     status = False
@@ -35,7 +37,6 @@ class HTTPControl:
             self.configHTTP = master.config["control"]["HTTP"]
         except KeyError:
             self.configHTTP = {}
-        self.debugLevel = self.configConfig.get("debugLevel", 1)
         self.httpPort = self.configHTTP.get("listenPort", 8080)
         self.status = self.configHTTP.get("enabled", False)
 
@@ -44,193 +45,118 @@ class HTTPControl:
             self.master.releaseModule("lib.TWCManager.Control", "HTTPControl")
             return None
 
-        httpd = ThreadingSimpleServer(("", self.httpPort), HTTPControlHandler)
-        httpd.master = master
-        self.master.debugLog(
-            1, "HTTPCtrl", "Serving at port: " + str(self.httpPort)
-        )
+        HTTPHandler = CreateHTTPHandlerClass(master)
+        httpd = ThreadingSimpleServer(("", self.httpPort), HTTPHandler)
+        self.master.debugLog(1, "HTTPCtrl", "Serving at port: " + str(self.httpPort))
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
 
 
-class HTTPControlHandler(BaseHTTPRequestHandler):
-
+def CreateHTTPHandlerClass(master):
+  class HTTPControlHandler(BaseHTTPRequestHandler):
+    ampsList = []
     fields = {}
+    hoursDurationList = []
+    master = None
     path = ""
     post_data = ""
-    version = "v1.2.0"
+    templateEnv = None
+    templateLoader = None
+    timeList = []
+    url = None
 
-    def do_bootstrap(self):
-        page = """
-        <meta name='viewport' content='width=device-width, initial-scale=1'>
-        <script src="https://code.jquery.com/jquery-3.3.1.min.js" integrity="sha384-tsQFqpEReu7ZLhBV2VZlAu7zcOV+rXbYlF2cqB8txI/8aZajjp4Bqd+V6D5IgvKT" crossorigin="anonymous"></script>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/popper.js/1.14.3/umd/popper.min.js" integrity="sha384-ZMP7rVo3mIykV+2+9J3UJ46jBk0WLaUAdn689aCwoqbBJiSnjAK/l8WvCWPIPm49" crossorigin="anonymous"></script>
-        <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.1.3/js/bootstrap.min.js" integrity="sha384-ChfqqxuZUCnJSK3+MXmPNIyE6ZbWh2IMqE241rYiqJxyMiZ6OW/JmZQ5stwEULTy" crossorigin="anonymous"></script>
-        <link rel='stylesheet' href='https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/css/bootstrap.min.css' integrity='sha384-ggOyR0iXCbMQv3Xipma34MD+dH/1fQ784/j6cY/iJTQUOhcWr7x9JvoRxT2MZw1T' crossorigin='anonymous'>
-        """
-        return page
+    def __init__(self, *args, **kwargs):
 
-    def do_css(self):
+        # Populate ampsList so that any function which requires a list of supported
+        # TWC amps can easily access it
+        if not len(self.ampsList):
+            self.ampsList.append([0, "Disabled"])
+            for amp in range(5, (master.config["config"].get("wiringMaxAmpsPerTWC", 5)) + 1):
+                self.ampsList.append([amp, str(amp) + "A"])
 
-        page = """
-          <style>
-          </style>
-        """
-        return page
+        # Populate list of hours
+        if not len(self.hoursDurationList):
+            for hour in range(1, 25):
+                self.hoursDurationList.append([(hour * 3600), str(hour) + "h"])
+
+        if not len(self.timeList):
+            for hour in range(0, 24):
+                for mins in [0, 15, 30, 45]:
+                    strHour = str(hour)
+                    strMins = str(mins)
+                    if hour < 10:
+                        strHour = "0" + str(hour)
+                    if mins < 10:
+                        strMins = "0" + str(mins)
+                    self.timeList.append([strHour + ":" + strMins, strHour + ":" + strMins])
+
+        # Define jinja2 template environment
+        # Note that we specify two paths in order to the template loader.
+        # The first is the user specified template. The second is the default.
+        # Jinja2 will try for the specified template first, however if any files
+        # are not found, it will fall back to the default theme.
+        self.templateLoader = jinja2.FileSystemLoader(searchpath=[
+          pathlib.Path(__file__).resolve().parent.as_posix()+"/themes/" + master.settings.get("webControlTheme", "Default")+"/",
+          pathlib.Path(__file__).resolve().parent.as_posix()+"/themes/Default/"])
+        self.templateEnv = jinja2.Environment(loader=self.templateLoader, autoescape=True)
+
+        # Make certain functions available to jinja2
+        # Where we have helper functions that we've used in the fast to
+        # render HTML, we can keep using those even inside jinja2
+        self.templateEnv.globals.update(addButton=self.addButton)
+        self.templateEnv.globals.update(ampsList=self.ampsList)
+        self.templateEnv.globals.update(chargeScheduleDay=self.chargeScheduleDay)
+        self.templateEnv.globals.update(doChargeSchedule=self.do_chargeSchedule)
+        self.templateEnv.globals.update(hoursDurationList=self.hoursDurationList)
+        self.templateEnv.globals.update(navbarItem=self.navbar_item)
+        self.templateEnv.globals.update(optionList=self.optionList)
+        self.templateEnv.globals.update(showTWCs=self.show_twcs)
+        self.templateEnv.globals.update(timeList=self.timeList)
+
+        # Set master object
+        self.master = master
+
+        # Call parent constructor last, this is where the request is served
+        BaseHTTPRequestHandler.__init__(self, *args, **kwargs)
+
+    def checkBox(self, name, value):
+        cb = "<input type=checkbox name='" + name + "'"
+        if value:
+            cb += " checked"
+        cb += ">"
+        return cb
 
     def do_chargeSchedule(self):
+        schedule = [ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" ]
+        settings = master.settings.get("Schedule", {})
+
         page = """
     <table class='table table-sm'>
       <thead>
         <th scope='col'>&nbsp;</th>
-        <th scope='col'>Sun</th>
-        <th scope='col'>Mon</th>
-        <th scope='col'>Tue</th>
-        <th scope='col'>Wed</th>
-        <th scope='col'>Thu</th>
-        <th scope='col'>Fri</th>
-        <th scope='col'>Sat</th>
+        """
+        for day in schedule:
+            page += "<th scope='col'>" + day[:3] + "</th>"
+        page += """
       </thead>
       <tbody>"""
         for i in (x for y in (range(6, 24), range(0, 6)) for x in y):
             page += "<tr><th scope='row'>%02d</th>" % (i)
-            for day in range(0, 6):
-                page += "<td>&nbsp;</td>"
+            for day in schedule:
+                today = settings.get(day, {})
+                curday = settings.get("Common", {})
+                if (settings.get("schedulePerDay", 0)):
+                    curday = settings.get(day, {})
+                if (today.get("enabled", None) == "on" and
+                   (int(curday.get("start", 0)[:2]) <= int(i)) and
+                   (int(curday.get("end", 0)[:2]) >= int(i))):
+                     page += "<td bgcolor='#CFFAFF'>SC @ " + str(settings.get("Settings", {}).get("scheduledAmpsMax", 0)) + "A</td>"
+                else:
+                    #Todo - need to mark track green + non scheduled chg
+                    page += "<td bgcolor='#FFDDFF'>&nbsp;</td>"
             page += "</tr>"
         page += "</tbody>"
         page += "</table>"
 
-        return page
-
-    def do_jsrefresh(self):
-        page = """
-      <script language = 'JavaScript'>
-
-      // AJAJ refresh for getStatus API call
-      $(document).ready(function() {  
-          function requestStatus() {
-              $.ajax({
-                  url: "/api/getStatus",
-                  dataType: "text",
-                  cache: false,
-                  success: function(data) {
-                      var json = $.parseJSON(data);
-                      Object.keys(json).forEach(function(key) {
-                        $('#'+key).html(json[key]);
-                      });
-
-                      // Change the state of the Charge Now button based on Charge Policy
-                      if (json["currentPolicy"] == "Charge Now") {
-                        document.getElementById("start_chargenow").value = "Update Charge Now";
-                        document.getElementById("cancel_chargenow").disabled = false;
-                      } else {
-                        document.getElementById("start_chargenow").value = "Start Charge Now";
-                        document.getElementById("cancel_chargenow").disabled = true;
-                      }
-                  }             
-              });
-              setTimeout(requestStatus, 3000);
-          }
-
-          requestStatus();
-      });
-
-      // AJAJ refresh for getSlaveTWCs API call
-      $(document).ready(function() {
-          function requestSlaves() {
-              $.ajax({
-                  url: "/api/getSlaveTWCs",
-                  dataType: "text",
-                  cache: false,
-                  success: function(data) {
-                      var json = $.parseJSON(data);
-                      Object.keys(json).forEach(function(key) {
-                        var slvtwc = json[key];
-                        var twc = '#' + slvtwc['TWCID']
-                        Object.keys(slvtwc).forEach(function(key) {
-                          $(twc+'_'+key).html(slvtwc[key]);
-                        });
-                      });
-                  }
-              });
-              setTimeout(requestSlaves, 3000);
-          }
-
-          requestSlaves();
-      });
-
-      $(document).ready(function() {
-        $("#start_chargenow").click(function(e) {
-          e.preventDefault();
-          $.ajax({
-            type: "POST",
-            url: "/api/chargeNow",
-            data: JSON.stringify({
-              chargeNowRate: $("#chargeNowRate").val(),
-              chargeNowDuration: $("#chargeNowDuration").val()
-            }),
-            dataType: "json"
-          });
-        });
-      });
-
-      $(document).ready(function() {
-        $("#cancel_chargenow").click(function(e) {
-          e.preventDefault();
-          $.ajax({
-            type: "POST",
-            url: "/api/cancelChargeNow",
-            data: {}
-          });
-        });
-      });
-
-      $(document).ready(function() {
-        $("#send_start_command").click(function(e) {
-          e.preventDefault();
-          $.ajax({
-            type: "POST",
-            url: "/api/sendStartCommand",
-            data: {}
-          });
-        });
-      });
-
-      $(document).ready(function() {
-        $("#send_stop_command").click(function(e) {
-          e.preventDefault();
-          $.ajax({
-            type: "POST",
-            url: "/api/sendStopCommand",
-            data: {}
-          });
-        });
-      });
-
-      // Enable tooltips
-      $(function () {
-        $('[data-toggle="tooltip"]').tooltip()
-      })
-      </script> """
-        return page
-
-    def do_navbar(self):
-        page = """
-    <p>&nbsp;</p>
-    <p>&nbsp;</p>
-    <nav class='navbar fixed-top navbar-dark bg-dark' role='navigation'>
-      <a class='navbar-brand' href='/'>TWCManager</a>
-        """
-        page += (
-            "<link rel='icon' type='image/png' href='https://raw.githubusercontent.com/ngardiner/TWCManager/master/tree/%s/html/favicon.png'>"
-            % self.version
-        )
-        page += self.navbar_item("/", "Home")
-        page += self.navbar_item("/policy", "Policy")
-        page += self.navbar_item("/schedule", "Schedule")
-        page += self.navbar_item("/settings", "Settings")
-        page += self.navbar_item("/debug", "Debug")
-        page += self.navbar_item("https://github.com/ngardiner/TWCManager", "GitHub")
-        page += "<span class='navbar-text'>%s</span></nav>" % self.version
         return page
 
     def navbar_item(self, url, name):
@@ -238,36 +164,35 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
         urlp = urllib.parse.urlparse(self.path)
         if urlp.path == url:
             active = "active"
-        page = "<ul class='navbar-nav mr-auto'>"
-        page += "<li class='nav-item %s'>" % active
+        page = "<li class='nav-item %s'>" % active
         page += "<a class='nav-link' href='%s'>%s</a>" % (url, name)
-        page += "</li></ul>"
+        page += "</li>"
         return page
 
     def do_API_GET(self):
-        url = urllib.parse.urlparse(self.path)
-        if url.path == "/api/getConfig":
+        self.debugLogAPI("Starting API GET")
+        if self.url.path == "/api/getConfig":
             self.send_response(200)
             self.send_header("Content-type", "application/json")
             self.end_headers()
 
-            json_data = json.dumps(self.server.master.config)
+            json_data = json.dumps(master.config)
             # Scrub output of passwords and API keys
             json_datas = re.sub(r'"password": ".*?",', "", json_data)
             json_data = re.sub(r'"apiKey": ".*?",', "", json_datas)
             self.wfile.write(json_data.encode("utf-8"))
 
-        elif url.path == "/api/getPolicy":
+        elif self.url.path == "/api/getPolicy":
             self.send_response(200)
             self.send_header("Content-type", "application/json")
             self.end_headers()
 
             json_data = json.dumps(
-                self.server.master.getModuleByName("Policy").charge_policy
+                master.getModuleByName("Policy").charge_policy
             )
             self.wfile.write(json_data.encode("utf-8"))
 
-        elif url.path == "/api/getSlaveTWCs":
+        elif self.url.path == "/api/getSlaveTWCs":
             data = {}
             totals = {
                 "lastAmpsOffered": 0,
@@ -275,33 +200,41 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
                 "maxAmps": 0,
                 "reportedAmpsActual": 0,
             }
-            for slaveTWC in self.server.master.getSlaveTWCs():
+            for slaveTWC in master.getSlaveTWCs():
                 TWCID = "%02X%02X" % (slaveTWC.TWCID[0], slaveTWC.TWCID[1])
                 data[TWCID] = {
                     "currentVIN": slaveTWC.currentVIN,
-                    "lastAmpsOffered": "%.2f" % float(slaveTWC.lastAmpsOffered),
-                    "lastHeartbeat": "%.2f" % float(time.time() - slaveTWC.timeLastRx),
+                    "lastAmpsOffered": round(slaveTWC.lastAmpsOffered, 2),
+                    "lastHeartbeat": round(time.time() - slaveTWC.timeLastRx, 2),
                     "lastVIN": slaveTWC.lastVIN,
-                    "lifetimekWh": str(slaveTWC.lifetimekWh),
+                    "lifetimekWh": slaveTWC.lifetimekWh,
                     "maxAmps": float(slaveTWC.maxAmps),
-                    "reportedAmpsActual": "%.2f" % float(slaveTWC.reportedAmpsActual),
-                    "state": str(slaveTWC.reportedState),
-                    "version": str(slaveTWC.protocolVersion),
-                    "voltsPhaseA": str(slaveTWC.voltsPhaseA),
-                    "voltsPhaseB": str(slaveTWC.voltsPhaseB),
-                    "voltsPhaseC": str(slaveTWC.voltsPhaseC),
+                    "reportedAmpsActual": float(slaveTWC.reportedAmpsActual),
+                    "state": slaveTWC.reportedState,
+                    "version": slaveTWC.protocolVersion,
+                    "voltsPhaseA": slaveTWC.voltsPhaseA,
+                    "voltsPhaseB": slaveTWC.voltsPhaseB,
+                    "voltsPhaseC": slaveTWC.voltsPhaseC,
                     "TWCID": "%s" % TWCID,
                 }
+                # Adding some vehicle data
+                vehicle = slaveTWC.getLastVehicle()
+                if vehicle != None:
+                    data[TWCID]["lastBatterySOC"] = vehicle.batteryLevel
+                    data[TWCID]["lastChargeLimit"] = vehicle.chargeLimit
+                    data[TWCID]["lastAtHome"] = vehicle.atHome
+                    data[TWCID]["lastTimeToFullCharge"] = vehicle.timeToFullCharge
+
                 totals["lastAmpsOffered"] += slaveTWC.lastAmpsOffered
                 totals["lifetimekWh"] += slaveTWC.lifetimekWh
                 totals["maxAmps"] += slaveTWC.maxAmps
                 totals["reportedAmpsActual"] += slaveTWC.reportedAmpsActual
 
             data["total"] = {
-                "lastAmpsOffered": "%.2f" % float(totals["lastAmpsOffered"]),
+                "lastAmpsOffered": round(totals["lastAmpsOffered"], 2),
                 "lifetimekWh": totals["lifetimekWh"],
                 "maxAmps": totals["maxAmps"],
-                "reportedAmpsActual": "%.2f" % float(totals["reportedAmpsActual"]),
+                "reportedAmpsActual": round(totals["reportedAmpsActual"], 2),
                 "TWCID": "total",
             }
 
@@ -312,39 +245,8 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
             json_data = json.dumps(data)
             self.wfile.write(json_data.encode("utf-8"))
 
-        elif url.path == "/api/getStatus":
-            data = {
-                "carsCharging": self.server.master.num_cars_charging_now(),
-                "chargerLoadWatts": "%.2f" % float(self.server.master.getChargerLoad()),
-                "currentPolicy": str(
-                    self.server.master.getModuleByName("Policy").active_policy
-                ),
-                "maxAmpsToDivideAmongSlaves": "%.2f"
-                % float(self.server.master.getMaxAmpsToDivideAmongSlaves()),
-            }
-            consumption = float(self.server.master.getConsumption())
-            if consumption:
-                data["consumptionAmps"] = (
-                    "%.2f" % self.server.master.convertWattsToAmps(consumption),
-                )
-                data["consumptionWatts"] = "%.2f" % consumption
-            else:
-                data["consumptionAmps"] = "%.2f" % 0
-                data["consumptionWatts"] = "%.2f" % 0
-            generation = float(self.server.master.getGeneration())
-            if generation:
-                data["generationAmps"] = (
-                    "%.2f" % self.server.master.convertWattsToAmps(generation),
-                )
-                data["generationWatts"] = "%.2f" % generation
-            else:
-                data["generationAmps"] = "%.2f" % 0
-                data["generationWatts"] = "%.2f" % 0
-            if self.server.master.getModuleByName("Policy").policyIsGreen():
-                data["isGreenPolicy"] = "Yes"
-            else:
-                data["isGreenPolicy"] = "No"
-
+        elif self.url.path == "/api/getStatus":
+            data = master.getStatus()
             self.send_response(200)
             self.send_header("Content-type", "application/json")
             self.end_headers()
@@ -352,12 +254,10 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
             json_data = json.dumps(data)
             try:
                 self.wfile.write(json_data.encode("utf-8"))
-            except BrokenPipeError as e:
-                self.master.debugLog(
-                    10, "HTTPCtrl", "Connection Error: Broken Pipe"
-                )
+            except BrokenPipeError:
+                self.debugLogAPI("Connection Error: Broken Pipe")
 
-        elif url.path == "/api/getHistory":
+        elif self.url.path == "/api/getHistory":
             output = []
             now = datetime.now().replace(second=0, microsecond=0).astimezone()
             startTime = now - timedelta(days=2) + timedelta(minutes=5)
@@ -365,18 +265,18 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
             startTime = startTime.replace(minute=math.floor(startTime.minute / 5) * 5)
 
             source = (
-                self.server.master.settings["history"]
-                if "history" in self.server.master.settings
+                master.settings["history"]
+                if "history" in master.settings
                 else []
             )
             data = {k: v for k, v in source if datetime.fromisoformat(k) >= startTime}
 
             avgCurrent = 0
-            for slave in self.server.master.getSlaveTWCs():
+            for slave in master.getSlaveTWCs():
                 avgCurrent += slave.historyAvgAmps
             data[
                 endTime.isoformat(timespec="seconds")
-            ] = self.server.master.convertAmpsToWatts(avgCurrent)
+            ] = master.convertAmpsToWatts(avgCurrent)
 
             output = [
                 {
@@ -402,7 +302,11 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write("".encode("utf-8"))
 
+        self.debugLogAPI("Ending API GET")
+
     def do_API_POST(self):
+
+        self.debugLogAPI("Starting API POST")
 
         if self.url.path == "/api/chargeNow":
             data = json.loads(self.post_data.decode("UTF-8"))
@@ -412,296 +316,292 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
             if rate == 0 or durn == 0:
                 self.send_response(400)
                 self.end_headers()
-                return
+                self.wfile.write("".encode("utf-8"))
 
-            self.server.master.setChargeNowAmps(rate)
-            self.server.master.setChargeNowTimeEnd(durn)
-            self.server.master.saveSettings()
-            self.send_response(200)
-            self.send_header("Content-type", "application/json")
+            else:
+                master.setChargeNowAmps(rate)
+                master.setChargeNowTimeEnd(durn)
+                master.queue_background_task({"cmd": "saveSettings"})
+                self.send_response(202)
+                self.end_headers()
+                self.wfile.write("".encode("utf-8"))
+
+        elif self.url.path == "/api/cancelChargeNow":
+            master.resetChargeNowAmps()
+            master.queue_background_task({"cmd": "saveSettings"})
+            self.send_response(202)
             self.end_headers()
-            return
+            self.wfile.write("".encode("utf-8"))
 
-        if self.url.path == "/api/cancelChargeNow":
-            self.server.master.resetChargeNowAmps()
-            self.server.master.saveSettings()
-            self.send_response(200)
-            self.send_header("Content-type", "application/json")
+        elif self.url.path == "/api/sendStartCommand":
+            master.sendStartCommand()
+            self.send_response(204)
             self.end_headers()
-            return
 
-        if self.url.path == "/api/sendStartCommand":
-            self.server.master.sendStartCommand()
-            self.send_response(200)
-            self.send_header("Content-type", "application/json")
+        elif self.url.path == "/api/sendStopCommand":
+            master.sendStopCommand()
+            self.send_response(204)
             self.end_headers()
-            return
 
-        if self.url.path == "/api/sendStopCommand":
-            self.server.master.sendStopCommand()
-            self.send_response(200)
-            self.send_header("Content-type", "application/json")
+        elif self.url.path == "/api/checkArrival":
+            master.queue_background_task({"cmd": "checkArrival"})
+            self.send_response(202)
             self.end_headers()
-            return
+            self.wfile.write("".encode("utf-8"))
 
-        # All other routes missed, return 404
-        self.send_response(404)
-        self.end_headers()
-        self.wfile.write("".encode("utf-8"))
-        return
+        elif self.url.path == "/api/checkDeparture":
+            master.queue_background_task({"cmd": "checkDeparture"})
+            self.send_response(202)
+            self.end_headers()
+            self.wfile.write("".encode("utf-8"))
 
-    def do_get_debug(self):
-        page = "<html><head>"
-        page += "<title>TWCManager</title>"
-        page += self.do_bootstrap()
-        page += self.do_css()
-        page += self.do_jsrefresh()
-        page += "</head>"
-        page += "<body>"
-        page += self.do_navbar()
-        page += """
-          Debug Interface - Coming soon
-        </body>
-        </html>
-        """
-        return page
+        elif self.url.path == "/api/setScheduledChargingSettings":
+            data = json.loads(self.post_data.decode("UTF-8"))
+            enabled = bool(data.get("enabled", False))
+            startingMinute = int(data.get("startingMinute", -1))
+            endingMinute = int(data.get("endingMinute", -1))
+            monday = bool(data.get("monday", False))
+            tuesday = bool(data.get("tuesday", False))
+            wednesday = bool(data.get("wednesday", False))
+            thursday = bool(data.get("thursday", False))
+            friday = bool(data.get("friday", False))
+            saturday = bool(data.get("saturday", False))
+            sunday = bool(data.get("sunday", False))
+            amps = int(data.get("amps", -1))
+            batterySize = int(
+                data.get("flexBatterySize", 100)
+            )  # using 100 as default, because with this every available car at moment should be finished with charging at the ending time
+            flexStart = int(data.get("flexStartEnabled", False))
+            weekDaysBitmap = (
+                    (1 if monday else 0)
+                    + (2 if tuesday else 0)
+                    + (4 if wednesday else 0)
+                    + (8 if thursday else 0)
+                    + (16 if friday else 0)
+                    + (32 if saturday else 0)
+                    + (64 if sunday else 0)
+            )
+
+            if (
+                    not (enabled)
+                    or startingMinute < 0
+                    or endingMinute < 0
+                    or amps <= 0
+                    or weekDaysBitmap == 0
+            ):
+                master.setScheduledAmpsMax(0)
+                master.setScheduledAmpsStartHour(-1)
+                master.setScheduledAmpsEndHour(-1)
+                master.setScheduledAmpsDaysBitmap(0)
+            else:
+                master.setScheduledAmpsMax(amps)
+                master.setScheduledAmpsStartHour(startingMinute / 60)
+                master.setScheduledAmpsEndHour(endingMinute / 60)
+                master.setScheduledAmpsDaysBitmap(weekDaysBitmap)
+            master.setScheduledAmpsBatterySize(batterySize)
+            master.setScheduledAmpsFlexStart(flexStart)
+            master.queue_background_task({"cmd": "saveSettings"})
+            self.send_response(202)
+            self.end_headers()
+            self.wfile.write("".encode("utf-8"))
+
+        else:
+            # All other routes missed, return 404
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write("".encode("utf-8"))
+
+        self.debugLogAPI("Ending API POST")
 
     def do_get_policy(self):
-        page = "<html><head>"
-        page += "<title>TWCManager</title>"
-        page += self.do_bootstrap()
-        page += self.do_css()
-        page += self.do_jsrefresh()
-        page += "</head>"
-        page += "<body>"
-        page += self.do_navbar()
-        page += """
+        page = """
       <table>
         """
         j = 0
-        for policy in self.server.master.getModuleByName("Policy").charge_policy:
-            if j == 0:
-                page += "<tr><th>Policy Override Point</th></tr>"
-                page += "<tr><td>Emergency</td></tr>"
-            if j == 1:
-                page += "<tr><th>Policy Override Point</th></tr>"
-                page += "<tr><td>Before</td></tr>"
-            if j == 3:
-                page += "<tr><th>Policy Override Point</th></tr>"
-                page += "<tr><td>After</td></tr>"
-            j += 1
-            page += "<tr><td>&nbsp;</td><td>" + policy["name"] + "</td></tr>"
+        mod_policy = master.getModuleByName("Policy")
+        insertion_points = {
+            0: "Emergency",
+            1: "Before",
+            3: "After"
+        }
+        replaced = all(x not in mod_policy.default_policy for x in mod_policy.charge_policy)
+        for policy in mod_policy.charge_policy:
+            if policy in mod_policy.default_policy:
+                cat = "Default"
+                ext = insertion_points.get(j, None)
+
+                if ext:
+                    page += "<tr><th>Policy Extension Point</th></tr>"
+                    page += "<tr><td>" + ext + "</td></tr>"
+
+                j += 1
+            else:
+                cat = "Custom" if replaced else insertion_points.get(j, "Unknown")
+            page += "<tr><td>&nbsp;</td><td>" + policy["name"] + " (" + cat + ")</td></tr>"
             page += "<tr><th>&nbsp;</th><th>&nbsp;</th><th>Match Criteria</th><th>Condition</th><th>Value</th></tr>"
-            for i in range(0, len(policy["match"])):
+            for match, condition, value in zip(policy["match"], policy["condition"], policy["value"]):
                 page += "<tr><td>&nbsp;</td><td>&nbsp;</td>"
-                page += "<td>" + policy["match"][i] + "</td>"
-                page += "<td>" + policy["condition"][i] + "</td>"
-                page += "<td>" + str(policy["value"][i]) + "</td></tr>"
+                page += "<td>" + str(match)
+                match_result = mod_policy.policyValue(match)
+                if match != match_result:
+                    page += " (" + str(match_result) + ")"
+                page += "</td>"
+
+                page += "<td>" + condition + "</td>"
+
+                page += "<td>" + str(value)
+                value_result = mod_policy.policyValue(value)
+                if value != value_result:
+                    page += " (" + str(value_result) + ")"
+                page += "</td></tr>"
 
         page += """
       </table>
+      </div>
     </body>
         """
-        return page
-
-    def do_get_schedule(self):
-        page = "<html><head>"
-        page += "<title>TWCManager</title>"
-        page += self.do_bootstrap()
-        page += self.do_css()
-        page += self.do_jsrefresh()
-        page += "</head>"
-        page += "<body>"
-        page += self.do_navbar()
-        page += """
-        <table>
-          <tr>
-            <td><b>Resume tracking green energy at:</b></td>
-            <td><select name = 'resumeGreenEnergy'>
-        """
-        for hr in range(0,24):
-            page += "<option value = ''>" + str(hr) + "</option>"
-        page += """
-            </select></td>
-          </tr>
-        """
-        page += """
-    </body>
-        """
-        return page
-
-    def do_get_settings(self):
-        page = "<html><head>"
-        page += "<title>TWCManager</title>"
-        page += self.do_bootstrap()
-        page += self.do_css()
-        page += self.do_jsrefresh()
-        page += "</head>"
-        page += "<body>"
-        page += self.do_navbar()
-        page += """
-    <html>
-    <head><title>Settings</title></head>
-    <body>
-    <form method=POST action='/settings/save'>
-      <table>
-        <tr>
-          <th>Stop Charging Method</th>
-          <td>
-        """
-        page += self.optionList(
-            [
-                [1, "Tesla API"],
-                [2, "Stop Responding to Slaves"],
-                [3, "Send Stop Command"],
-            ],
-            {
-                "name": "chargeStopMode",
-                "value": self.server.master.settings.get("chargeStopMode", "1"),
-            },
-        )
-        page += """
-          </td>
-        </tr>
-        <tr>
-          <th>Non-Scheduled power action:</th>
-          <td>
-        """
-        page += self.optionList(
-            [ 
-                [1, "Charge at specified Non-Scheduled Charge Rate"],
-                [2, "Do not Charge"],
-                [3, "Track Green Energy"],
-            ],
-            {
-                "name": "nonScheduledAction",
-                "value": self.server.master.settings.get("nonScheduledAction", "1"),
-            },
-        )
-        page += """
-        </tr>
-        <tr>
-          <th>Non-scheduled power charge rate:</th>
-          <td>
-        """
-        maxamps = self.server.master.config["config"].get("wiringMaxAmpsPerTWC", 5)
-        amps = []
-        for amp in range(5, (maxamps + 1)):
-            amps.append([amp, str(amp) + "A"])
-        page += self.optionList(amps, {"name": "nonScheduledAmpsMax", "value": self.server.master.settings.get("nonScheduledAmpsMax", "6")})
-        page += """
-          </td>
-        </tr>
-        <tr>
-          <td>&nbsp;</td>
-          <td><input class='btn btn-outline-success' type=submit value='Save Settings' /></td>
-        </tr>
-      </table>
-    </form>
-        """
-        page += (
-            "<p>Click <a href='https://github.com/ngardiner/TWCManager/tree/%s/docs/Settings.md' target='_new'>here</a> for detailed information on settings on this page</p>"
-            % self.version
-        )
-        page += "</body></html>"
         return page
 
     def do_GET(self):
-        url = urllib.parse.urlparse(self.path)
+        self.url = urllib.parse.urlparse(self.path)
 
-        if url.path.startswith("/api/"):
+        # serve local static content files (from './lib/TWCManager/Control/static/' dir)
+        if self.url.path.startswith('/static/'):
+            content_type = mimetypes.guess_type(self.url.path)[0]
+
+            # only server know content type
+            if content_type is not None:
+                filename = pathlib.Path(__file__).resolve().parent.as_posix() + self.url.path
+
+                # check if static file exists and is readable
+                if os.path.isfile(filename) and os.access(filename, os.R_OK):
+                    self.send_response(200)
+                    self.send_header('Content-type', content_type)
+                    self.end_headers()
+
+                    # send static content (e.g. images) to browser
+                    with open(filename, 'rb') as staticFile:
+                        self.wfile.write(staticFile.read())
+                        return
+                else:
+                    # static file doesn't exit or isn't readable
+                    self.send_response(404)
+                    return
+
+        # Service API requests
+        if self.url.path.startswith("/api/"):
             self.do_API_GET()
             return
 
-        if (
-            url.path == "/"
-            or url.path == "/apiacct/True"
-            or url.path == "/apiacct/False"
-        ):
-            self.send_response(200)
-            self.send_header("Content-type", "text/html")
-            self.end_headers()
-
-            # Send the html message
-            page = "<html><head>"
-            page += "<title>TWCManager</title>"
-            page += self.do_bootstrap()
-            page += self.do_css()
-            page += self.do_jsrefresh()
-            page += "</head>"
-            page += "<body>"
-            page += self.do_navbar()
-            page += "<table border='0' padding='0' margin='0' width='100%'>"
-            page += "<tr width='100%'><td valign='top' width='70%'>"
-
-            if url.path == "/apiacct/False":
-                page += "<font color='red'><b>Failed to log in to Tesla Account. Please check username and password and try again.</b></font>"
-
-            if (
-                not self.server.master.teslaLoginAskLater
-                and url.path != "/apiacct/True"
-            ):
-                # Check if we have already stored the Tesla credentials
-                # If we can access the Tesla API okay, don't prompt
-                if not self.server.master.getModuleByName(
-                    "TeslaAPI"
-                ).car_api_available():
-                    page += self.request_teslalogin()
-
-            if url.path == "/apiacct/True":
-                page += "<b>Thank you, successfully fetched Tesla API token."
-
-            page += self.show_status()
-            page += "</td><td valign=top width='30%'>"
-            page += self.do_chargeSchedule()
-            page += "</td></tr>"
-            page += "</table>"
-            page += "</body>"
-            page += "</table>"
-            page += "</html>"
-
-            self.wfile.write(page.encode("utf-8"))
-            return
-
-        if url.path == "/debug":
-            self.send_response(200)
-            self.send_header("Content-type", "text/html")
-            self.end_headers()
-            page = self.do_get_debug()
-            self.wfile.write(page.encode("utf-8"))
-            return
-
-        if url.path == "/policy":
-            self.send_response(200)
-            self.send_header("Content-type", "text/html")
-            self.end_headers()
-            page = self.do_get_policy()
-            self.wfile.write(page.encode("utf-8"))
-            return
-
-        if url.path == "/schedule":
-            self.send_response(200)
-            self.send_header("Content-type", "text/html")
-            self.end_headers()
-            page = self.do_get_schedule()
-            self.wfile.write(page.encode("utf-8"))
-            return
-
-        if url.path == "/settings":
-            self.send_response(200)
-            self.send_header("Content-type", "text/html")
-            self.end_headers()
-            page = self.do_get_settings()
-            self.wfile.write(page.encode("utf-8"))
-            return
-
-        if url.path == "/tesla-login":
+        if self.url.path == "/teslaAccount/login":
             # For security, these details should be submitted via a POST request
             # Send a 405 Method Not Allowed in response.
             self.send_response(405)
             page = "This function may only be requested via the POST HTTP method."
             self.wfile.write(page.encode("utf-8"))
             return
+
+        if (
+            self.url.path == "/"
+            or self.url.path.startswith("/teslaAccount")
+        ):
+            self.send_response(200)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+
+            # Load "main" template and render
+            self.template = self.templateEnv.get_template("main.html.j2")
+
+            # Set some values that we use within the template
+            # Check if we're able to access the Tesla API
+            self.apiAvailable = master.getModuleByName(
+                "TeslaAPI"
+            ).car_api_available()
+            self.scheduledAmpsMax = master.getScheduledAmpsMax()
+
+            # Send the html message
+            page = self.template.render(vars(self))
+
+            self.wfile.write(page.encode("utf-8"))
+            return
+
+        if self.url.path == "/debug":
+            self.send_response(200)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+
+            # Load debug template and render
+            self.template = self.templateEnv.get_template("debug.html.j2")
+            page = self.template.render(self.__dict__)
+
+            self.wfile.write(page.encode("utf-8"))
+            return
+
+        if self.url.path == "/policy":
+            self.send_response(200)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+
+            # Load policy template and render
+            self.template = self.templateEnv.get_template("policy.html.j2")
+            page = self.template.render(self.__dict__)
+
+            page += self.do_get_policy()
+            self.wfile.write(page.encode("utf-8"))
+            return
+
+        if self.url.path == "/schedule":
+            self.send_response(200)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+
+            # Load template and render
+            self.template = self.templateEnv.get_template("schedule.html.j2")
+            page = self.template.render(self.__dict__)
+
+            self.wfile.write(page.encode("utf-8"))
+            return
+
+        if self.url.path == "/settings":
+            self.send_response(200)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+
+            # Load template and render
+            self.template = self.templateEnv.get_template("settings.html.j2")
+            page = self.template.render(self.__dict__)
+
+            self.wfile.write(page.encode("utf-8"))
+            return
+
+        if self.url.path == "/graphs" or self.url.path == "/graphsP":
+            # We query the last 24h by default
+            now = datetime.now().replace(second=0, microsecond=0)
+            initial=now - timedelta(hours=24)
+            end= now
+            # It we came from a POST the dates should be already stored in settings
+            if self.url.path == "/graphs":
+               self.process_save_graphs(
+                   str(initial.strftime("%Y-%m-%dT%H:%M")),
+                   str(end.strftime("%Y-%m-%dT%H:%M")))
+
+            self.send_response(200)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+            # Load debug template and render
+            self.template = self.templateEnv.get_template("graphs.html.j2")
+            page = self.template.render(self.__dict__)
+            self.wfile.write(page.encode("utf-8"))
+            return
+
+        if self.url.path == "/graphs/date":
+            inicio=master.settings["Graphs"]["Initial"]
+            fin=master.settings["Graphs"]["End"]
+
+            self.process_graphs(inicio,fin)
+            return
+
+
 
         # All other routes missed, return 404
         self.send_response(404)
@@ -722,17 +622,43 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
 
         self.fields = urllib.parse.parse_qs(self.post_data.decode("utf-8"))
 
+        if self.url.path == "/schedule/save":
+            # User has submitted schedule.
+            self.process_save_schedule()
+            return
+
         if self.url.path == "/settings/save":
             # User has submitted settings.
             # Call dedicated function
             self.process_save_settings()
             return
 
-        if self.url.path == "/tesla-login":
+        if self.url.path == "/teslaAccount/login":
             # User has submitted Tesla login.
             # Pass it to the dedicated process_teslalogin function
             self.process_teslalogin()
             return
+
+        if self.url.path == "/graphs/dates":
+            # User has submitted dates to graph this period.
+            objIni = self.getFieldValue("dateIni")
+            objEnd = self.getFieldValue("dateEnd")
+
+            if not objIni or not objEnd:
+                # Redirect back to graphs page if no Start or End time supplied
+                self.send_response(302)
+                self.send_header("Location", "/graphs")
+
+            else:
+
+                self.process_save_graphs(objIni, objEnd)
+                self.send_response(302)
+                self.send_header("Location", "/graphsP")
+
+            self.end_headers()
+            self.wfile.write("".encode("utf-8"))
+            return
+
 
         # All other routes missed, return 404
         self.send_response(404)
@@ -751,38 +677,161 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
         )
         return page
 
+    def chargeScheduleDay(self, day):
+
+        # Fetch current settings
+        sched = master.settings.get("Schedule", {})
+        today = sched.get(day, {})
+        suffix = day + "ChargeTime"
+
+        # Render daily schedule options
+        page  = "<tr>"
+        page += "<td>" + self.checkBox("enabled"+suffix, 
+                today.get("enabled", 0)) + "</td>"
+        page += "<td>" + str(day) + "</td>"
+        page += "<td>" + self.optionList(self.timeList, 
+          {"name": "start"+suffix,
+           "value": today.get("start", "00:00")}) + "</td>"
+        page += "<td> to </td>"
+        page += "<td>" + self.optionList(self.timeList, 
+          {"name": "end"+suffix,
+           "value": today.get("end", "00:00")}) + "</td>"
+        page += "<td>" + self.checkBox("flex"+suffix, 
+                today.get("flex", 0)) + "</td>"
+        page += "<td>Flex Charge</td>"
+        page += "</tr>"
+        return page
+
+    def getFieldValue(self, key):
+        # Parse the form value represented by key, and return the
+        # value either as an integer or string
+        keya = str(key)
+        try:
+            vala = self.fields[key][0].replace("'", "")
+        except KeyError:
+            return None
+        try:
+            if int(vala) or vala == "0":
+                return int(vala)
+        except ValueError:
+            return vala
+
     def log_message(self, format, *args):
         pass
 
     def optionList(self, list, opts={}):
         page = "<div class='form-group'>"
-        page += "<select class='form-control' id='%s' name='%s'>" % (opts.get("name", ""), opts.get("name", ""))
+        page += "<select class='form-control' id='%s' name='%s'>" % (
+            opts.get("name", ""),
+            opts.get("name", ""),
+        )
         for option in list:
             sel = ""
             if str(opts.get("value", "-1")) == str(option[0]):
                 sel = "selected"
             page += "<option value='%s' %s>%s</option>" % (option[0], sel, option[1])
-        page += "</div>"
         page += "</select>"
+        page += "</div>"
         return page
+
+    def process_save_schedule(self):
+
+        # Check that schedule dict exists within settings.
+        # If not, this would indicate that this is the first time
+        # we have saved the new schedule settings
+        if (master.settings.get("Schedule", None) == None):
+            master.settings["Schedule"] = {}
+
+        # Slight issue with checkboxes, you have to default them all to
+        # false, otherwise if one is unticked it is just not sent via form data
+        days = [ "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" ]
+        for day in days:
+            if (master.settings["Schedule"].get(day, None) == None):
+                master.settings["Schedule"][day] = {}
+            master.settings["Schedule"][day]["enabled"] = ""
+            master.settings["Schedule"][day]["flex"] = ""
+
+        # Detect schedule keys. Rather than saving them in a flat
+        # structure, we'll store them multi-dimensionally
+        fieldsout = self.fields.copy()
+        ct = re.compile(r'(?P<trigger>enabled|end|flex|start)(?P<day>.*?)ChargeTime')
+        for key in self.fields:
+            match = ct.match(key)
+            if match:
+                # Detected a multi-dimensional (per-day) key
+                # Rewrite it into the settings array and delete it
+                # from the input
+
+                if master.settings["Schedule"].get(match.group(2), None) == None:
+                    # Create dictionary key for this day
+                    master.settings["Schedule"][match.group(2)] = {}
+
+                # Set per-day settings
+                master.settings["Schedule"][match.group(2)][match.group(1)] = self.getFieldValue(key)
+
+            else:
+                if master.settings["Schedule"].get("Settings", None) == None:
+                    master.settings["Schedule"]["Settings"] = {}
+                master.settings["Schedule"]["Settings"][key] = self.getFieldValue(key)
+
+        # During Phase 1 (backwards compatibility) for the new scheduling
+        # UI, after writing the settings in the inteded new format, we then
+        # write back to the existing settings nodes so that it is backwards
+        # compatible.
+
+        # Green Energy Tracking
+        master.settings["hourResumeTrackGreenEnergy"] = int(master.settings["Schedule"]["Settings"]["resumeGreenEnergy"][:2])
+
+        # Scheduled amps
+        master.settings["scheduledAmpsStartHour"] = int(master.settings["Schedule"]["Common"]["start"][:2])
+        master.settings["scheduledAmpsEndHour"] = int(master.settings["Schedule"]["Common"]["end"][:2])
+        master.settings["scheduledAmpsMax"] = float(master.settings["Schedule"]["Settings"]["scheduledAmpsMax"])
+
+        # Scheduled Days bitmap backward compatibility
+        master.settings["scheduledAmpsDaysBitmap"] = (
+            (1 if master.settings["Schedule"]["Monday"]["enabled"] else 0)
+            + (2 if master.settings["Schedule"]["Tuesday"]["enabled"] else 0)
+            + (4 if master.settings["Schedule"]["Wednesday"]["enabled"] else 0)
+            + (8 if master.settings["Schedule"]["Thursday"]["enabled"] else 0)
+            + (16 if master.settings["Schedule"]["Friday"]["enabled"] else 0)
+            + (32 if master.settings["Schedule"]["Saturday"]["enabled"] else 0)
+            + (64 if master.settings["Schedule"]["Sunday"]["enabled"] else 0)
+            )
+
+        # Save Settings
+        master.queue_background_task({"cmd": "saveSettings"})
+
+        self.send_response(302)
+        self.send_header("Location", "/")
+        self.end_headers()
+        self.wfile.write("".encode("utf-8"))
+        return
 
     def process_save_settings(self):
 
-        # Write settings
+        # This function will write the settings submitted from the settings
+        # page to the settings dict, before triggering a write of the settings
+        # to file
         for key in self.fields:
-            keya = str(key)
-            vala = self.fields[key][0].replace("'", "")
-            try:
-                if int(vala):
-                    self.server.master.settings[keya] = int(vala)
-            except ValueError:
-                self.server.master.settings[keya] = vala
 
-        # If Non-Scheduled power action is either Do not Charge or 
+            # If the key relates to the car API tokens, we need to pass these
+            # to the appropriate module, rather than directly updating the
+            # configuration file (as it would just be overwritten)
+            if (key == "carApiBearerToken" or key == "carApiRefreshToken") and self.getFieldValue(key) != "":
+                carapi = master.getModuleByName("TeslaAPI")
+                if key == "carApiBearerToken":
+                    carapi.setCarApiBearerToken(self.getFieldValue(key))
+                elif key == "carApiRefreshToken":
+                    carapi.setCarApiRefreshToken(self.getFieldValue(key))
+
+            # Write setting to dictionary
+            master.settings[key] = self.getFieldValue(key)
+
+        # If Non-Scheduled power action is either Do not Charge or
         # Track Green Energy, set Non-Scheduled power rate to 0
-        if int(self.server.master.settings.get("nonScheduledAction", 1)) > 1:
-            self.server.master.settings['nonScheduledAmpsMax'] = 0
-        self.server.master.saveSettings()
+        if int(master.settings.get("nonScheduledAction", 1)) > 1:
+            master.settings["nonScheduledAmpsMax"] = 0
+        master.queue_background_task({"cmd": "saveSettings"})
 
         # Redirect to the index page
         self.send_response(302)
@@ -794,20 +843,20 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
     def process_teslalogin(self):
         # Check if we are skipping Tesla Login submission
 
-        if not self.server.master.teslaLoginAskLater:
+        if not master.teslaLoginAskLater:
             later = False
             try:
                 later = len(self.fields["later"])
-            except KeyError as e:
+            except KeyError:
                 later = False
 
             if later:
-                self.server.master.teslaLoginAskLater = True
+                master.teslaLoginAskLater = True
 
-        if not self.server.master.teslaLoginAskLater:
+        if not master.teslaLoginAskLater:
             # Connect to Tesla API
 
-            carapi = self.server.master.getModuleByName("TeslaAPI")
+            carapi = master.getModuleByName("TeslaAPI")
             carapi.setCarApiLastErrorTime(0)
             ret = carapi.car_api_available(
                 self.fields["email"][0], self.fields["password"][0]
@@ -816,7 +865,7 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
             # Redirect to an index page with output based on the return state of
             # the function
             self.send_response(302)
-            self.send_header("Location", "/apiacct/" + str(ret))
+            self.send_header("Location", "/teslaAccount/" + str(ret))
             self.end_headers()
             self.wfile.write("".encode("utf-8"))
             return
@@ -828,148 +877,6 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write("".encode("utf-8"))
             return
-
-    def request_teslalogin(self):
-        page = "<form action='/tesla-login' method='POST'>"
-        page += "<p>Enter your email and password to allow TWCManager to start and "
-        page += "stop Tesla vehicles you own from charging. These credentials are "
-        page += "sent once to Tesla and are not stored. Credentials must be entered "
-        page += "again if no cars are connected to this charger for over 45 days."
-        page += "</p>"
-        page += "<input type=hidden name='page' value='tesla-login' />"
-        page += "<p>"
-        page += "<table>"
-        page += "<tr><td>Tesla Account E-Mail:</td>"
-        page += "<td><input type='text' name='email' value=''></td></tr>"
-        page += "<tr><td>Password:</td>"
-        page += "<td><input type='password' name='password'></td></tr>"
-        page += "<tr><td><input type='submit' name='submit' value='Log In'></td>"
-        page += "<td><input type='submit' name='later' value='Ask Me Later'></td>"
-        page += "</tr>"
-        page += "</table>"
-        page += "</p>"
-        page += "</form>"
-        return page
-
-    def show_commands(self):
-
-        page = """
-          <table class='table table-dark'>
-          <tr><th colspan=4 width = '30%'>Charge Now</th>
-          <th colspan=1 width = '30%'>Commands</th></tr>
-          <tr><td width = '8%'>Charge for:</td>
-          <td width = '7%'>
-        """
-        hours = []
-        for hour in range(1, 25):
-            hours.append([(hour * 3600), str(hour) + "h"])
-        page += self.optionList(hours, {"name": "chargeNowDuration"})
-        page += """
-          </td>
-          <td width = '8%'>Charge Rate:</td>
-          <td width = '7%'>
-        """
-        amps = []
-        maxamps = self.server.master.config["config"].get("wiringMaxAmpsPerTWC", 5)
-        for amp in range(5, (maxamps + 1)):
-            amps.append([amp, str(amp) + "A"])
-        page += self.optionList(amps, {"name": "chargeNowRate"})
-        page += """
-          </td>
-          <td>
-        """
-        page += self.addButton(
-            ["send_stop_command", "Stop All Charging"],
-            "class='btn btn-outline-danger' data-toggle='tooltip' data-placement='top' title='WARNING: This function causes Tesla Vehicles to Stop Charging until they are physically re-connected to the TWC.'",
-        )
-        page += """
-          </td></tr>
-          <tr><td colspan = '2'>
-        """
-        page += self.addButton(
-            ["start_chargenow", "Start Charge Now"],
-            "class='btn btn-outline-success' data-toggle='tooltip' data-placement='top' title='Note: Charge Now command takes approximately 2 minutes to activate.'",
-        )
-        page += "</td><td colspan = '2'>"
-        page += self.addButton(
-            ["cancel_chargenow", "Cancel Charge Now"], "class='btn btn-outline-danger'"
-        )
-        page += """
-          </td>
-          <td>
-        """
-        page += self.addButton(
-            ["send_start_command", "Start All Charging"],
-            "class='btn btn-outline-success'",
-        )
-        page += """
-          </td></tr>
-          </table>
-        """
-        return page
-
-    def show_status(self):
-
-        page = """
-        <table width='100%'><tr><td width='60%'>
-        <table class='table table-dark'>
-        <tr>
-          <th>Amps to share across all TWCs:</th>
-          <td><div id='maxAmpsToDivideAmongSlaves'></div></td><td>amps</td>
-        </tr>
-        <tr>
-          <th>Current Generation</th>
-          <td><div id='generationWatts'></div></td><td>watts</td>
-          <td><div id="generationAmps"></div></td><td>amps</td>
-        </tr>
-        <tr>
-          <th>Current Consumption</th>
-          <td><div id='consumptionWatts'></div></td><td>watts</td>
-          <td><div id='consumptionAmps'></div></td><td>amps</td>
-        </tr>
-        <tr>
-          <th>Current Charger Load</th>
-          <td><div id="chargerLoadWatts"></div></td><td>watts</td>
-        </tr>
-        <tr>
-          <th>Number of Cars Charging</th>
-          <td><div id="carsCharging"></div></td>
-          <td>cars</td>
-        </tr>
-        </table></td>
-        """
-
-        page += "<td width='40%'>"
-        page += "<table class='table table-dark'>"
-        page += "<tr><th>Current Policy</th>"
-        page += "<td><div id='currentPolicy'></div></td></tr>"
-        page += "<tr><th>Scheduled Charging Amps</th>"
-        page += "<td>" + str(self.server.master.getScheduledAmpsMax()) + "</td></tr>"
-
-        page += "<tr><th>Scheduled Charging Start Hour</th>"
-        page += (
-            "<td>" + str(self.server.master.getScheduledAmpsStartHour()) + "</td></tr>"
-        )
-
-        page += "<tr><th>Scheduled Charging End Hour</th>"
-        page += "<td>" + str(self.server.master.getScheduledAmpsEndHour()) + "</td>"
-        page += """
-        </tr>
-        <tr>
-          <th>Is a Green Policy?</th>
-          <td><div id='isGreenPolicy'></div></td>
-        </tr>
-        </table></td>
-        """
-
-        page += "<tr><td width = '100%' colspan = '2'>"
-        page += self.show_twcs()
-        page += "</td></tr>"
-
-        page += "<tr><td width = '100%' colspan = '2'>"
-        page += self.show_commands()
-        page += "</td></tr></table>"
-        return page
 
     def show_twcs(self):
 
@@ -990,7 +897,7 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
             <th width='2%'>Commands</th>
           </tr></thead>
         """
-        for slaveTWC in self.server.master.getSlaveTWCs():
+        for slaveTWC in master.getSlaveTWCs():
             twcid = "%02X%02X" % (slaveTWC.TWCID[0], slaveTWC.TWCID[1])
             page += "<tr>"
             page += "<td>%s</td>" % twcid
@@ -1001,13 +908,13 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
             page += "<td><div id='%s_reportedAmpsActual'></div></td>" % twcid
             page += "<td><div id='%s_lifetimekWh'></div></td>" % twcid
             page += (
-                "<td><span id='%s_voltsPhaseA'></span> / <span id='%s_voltsPhaseB'></span> / <span id='%s_voltsPhaseC'></span></td>"
-                % (twcid, twcid, twcid)
+                    "<td><span id='%s_voltsPhaseA'></span> / <span id='%s_voltsPhaseB'></span> / <span id='%s_voltsPhaseC'></span></td>"
+                    % (twcid, twcid, twcid)
             )
             page += "<td><span id='%s_lastHeartbeat'></span> sec</td>" % twcid
             page += (
-                "<td>C: <span id='%s_currentVIN'></span><br />L: <span id='%s_lastVIN'></span></td>"
-                % (twcid, twcid)
+                    "<td>C: <span id='%s_currentVIN'></span><br />L: <span id='%s_lastVIN'></span></td>"
+                    % (twcid, twcid)
             )
             page += """
             <td>
@@ -1019,7 +926,7 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
               </div>
             </td>
             """
-            page += "</tr>\n"
+            page += "</tr>"
         page += "<tr><td><b>Total</b><td>&nbsp;</td><td>&nbsp;</td>"
         page += "<td><div id='total_maxAmps'></div></td>"
         page += "<td><div id='total_lastAmpsOffered'></div></td>"
@@ -1027,3 +934,89 @@ class HTTPControlHandler(BaseHTTPRequestHandler):
         page += "<td><div id='total_lifetimekWh'></div></td>"
         page += "</tr></table></td></tr></table>"
         return page
+
+    def process_save_graphs(self,initial,end):
+        # Check that Graphs dict exists within settings.
+        # If not, this would indicate that this is the first time
+        # we have saved it
+        if (master.settings.get("Graphs", None) == None):
+            master.settings["Graphs"] = {}
+        master.settings["Graphs"]["Initial"]=initial
+        master.settings["Graphs"]["End"]=end
+
+        return
+
+    def process_graphs(self,init,end):
+        # This function will query the green_energy SQL table
+        result={}
+
+        # We will use the first loaded logging module with query capabilities to build the graphs.
+        module = None
+
+        for candidate_module in master.getModulesByType("Logging"):
+            if candidate_module["ref"].getCapabilities("queryGreenEnergy"):
+                master.debugLog(6,"HTTPCtrl","Logging module %s supports queryGreenEnergy" % candidate_module["name"])
+                module = candidate_module["ref"]
+            else:
+                master.debugLog(6,"HTTPCtrl","Logging module %s does not support queryGreenEnergy" % candidate_module["name"])
+
+        # If we were unable to find a loaded Logging module with the capability to query
+        # values for graphs, return a HTTP error code
+        if not module:
+            self.send_response(400)
+            self.end_headers()
+            return
+
+        try:
+           result= module.queryGreenEnergy(
+                               {
+                                   "dateBegin": datetime.strptime(init, "%Y-%m-%dT%H:%M"),
+                                   "dateEnd": datetime.strptime(end, "%Y-%m-%dT%H:%M")
+                               }
+                             )
+        except Exception as e:
+            master.debugLog(1,
+                "HTTPCtrl",
+                "Excepcion queryGreenEnergy: "
+                + e,
+            )
+
+        data = {}
+        data[0] = {
+                "initial":init,
+                "end":end,
+        }
+        i=1
+        while i<len(result):
+            data[i] = {
+                "time": result[i][0].strftime("%Y-%m-%dT%H:%M:%S"),
+                "genW": str(result[i][1]),
+                "conW": str(result[i][2]),
+                "chgW": str(result[i][3]),
+                }
+            i=i+1
+
+        self.send_response(200)
+        self.send_header("Content-type", "application/json")
+        self.end_headers()
+
+        json_data = json.dumps(data)
+        try:
+            self.wfile.write(json_data.encode("utf-8"))
+        except BrokenPipeError:
+            master.debugLog(10,"HTTPCtrl","Connection Error: Broken Pipe")
+        return
+
+
+    def debugLogAPI(self, message):
+        master.debugLog(10, 
+            "HTTPCtrl", 
+            message
+            + " (Url: "
+            + str(self.url.path)
+            + " / IP: "
+            + str(self.client_address[0])
+            + ")",
+        )
+
+  return HTTPControlHandler

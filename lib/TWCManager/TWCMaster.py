@@ -11,6 +11,8 @@ import threading
 import time
 from ww import f
 import math
+import random
+import bisect
 
 
 class TWCMaster:
@@ -19,9 +21,11 @@ class TWCMaster:
     backgroundTasksQueue = queue.Queue()
     backgroundTasksCmds = {}
     backgroundTasksLock = threading.Lock()
+    backgroundTasksDelayed = []
     config = None
     consumptionValues = {}
     debugLevel = 0
+    debugOutputToFile = False
     generationValues = {}
     lastkWhMessage = time.time()
     lastkWhPoll = 0
@@ -58,6 +62,7 @@ class TWCMaster:
     subtractChargerLoad = False
     teslaLoginAskLater = False
     TWCID = None
+    version = "1.2.1"
 
     # TWCs send a seemingly-random byte after their 2-byte TWC id in a number of
     # messages. I call this byte their "Sign" for lack of a better term. The byte
@@ -70,7 +75,8 @@ class TWCMaster:
 
     def __init__(self, TWCID, config):
         self.config = config
-        self.debugLevel = config["config"]["debugLevel"]
+        self.debugLevel = config["config"].get("debugLevel", 1)
+        self.debugOutputToFile = config["config"].get("debugOutputToFile", False)
         self.TWCID = TWCID
         self.subtractChargerLoad = config["config"]["subtractChargerLoad"]
         self.advanceHistorySnap()
@@ -87,12 +93,23 @@ class TWCMaster:
 
     def advanceHistorySnap(self):
         try:
-          futureSnap = datetime.now().astimezone() + timedelta(minutes=5)
-          self.nextHistorySnap = futureSnap.replace(
-              minute=math.floor(futureSnap.minute / 5) * 5, second=0, microsecond=0
-          )
+            futureSnap = datetime.now().astimezone() + timedelta(minutes=5)
+            self.nextHistorySnap = futureSnap.replace(
+                minute=math.floor(futureSnap.minute / 5) * 5, second=0, microsecond=0
+            )
         except ValueError as e:
-          self.debugLog(10, "TWCMaster", "Exception in advanceHistorySnap: " + str(e))
+            self.debugLog(10, "TWCMaster", "Exception in advanceHistorySnap: " + str(e))
+
+    def checkModuleCapability(self, type, capability):
+        # For modules which advertise capabilities, scan all loaded modules of a certain type and
+        # report on if any of those modules advertise the reported capability
+        match = False
+
+        for module in self.getModulesByType(type):
+            if module["ref"].getCapabilities(capability):
+                match = True
+
+        return match
 
     def checkScheduledCharging(self):
 
@@ -100,17 +117,19 @@ class TWCMaster:
         # of nonScheduledAmpsMax
         blnUseScheduledAmps = 0
         ltNow = time.localtime()
+        hourNow = ltNow.tm_hour + (ltNow.tm_min / 60)
+        timeSettings = self.getScheduledAmpsTimeFlex()
+        startHour = timeSettings[0]
+        endHour = timeSettings[1]
+        daysBitmap = timeSettings[2]
 
         if (
             self.getScheduledAmpsMax() > 0
-            and self.settings.get("scheduledAmpsStartHour", -1) > -1
-            and self.getScheduledAmpsEndHour() > -1
-            and self.getScheduledAmpsDaysBitmap() > 0
+            and startHour > -1
+            and endHour > -1
+            and daysBitmap > 0
         ):
-            if (
-                self.settings.get("scheduledAmpsStartHour", -1)
-                > self.getScheduledAmpsEndHour()
-            ):
+            if startHour > endHour:
                 # We have a time like 8am to 7am which we must interpret as the
                 # 23-hour period after 8am or before 7am. Since this case always
                 # crosses midnight, we only ensure that scheduledAmpsDaysBitmap
@@ -118,13 +137,11 @@ class TWCMaster:
                 # scheduledAmpsDaysBitmap says only schedule on Monday, 8am to
                 # 7am, we apply scheduledAmpsMax from Monday at 8am to Monday at
                 # 11:59pm, and on Tuesday at 12am to Tuesday at 6:59am.
-                hourNow = ltNow.tm_hour + (ltNow.tm_min / 60)
-                if (
-                    hourNow >= self.settings.get("scheduledAmpsStartHour", -1)
-                    and (self.getScheduledAmpsDaysBitmap() & (1 << ltNow.tm_wday))
-                ) or (
-                    hourNow < self.getScheduledAmpsEndHour()
-                    and (self.getScheduledAmpsDaysBitmap() & (1 << yesterday))
+                yesterday = ltNow.tm_wday - 1
+                if yesterday < 0:
+                    yesterday += 7
+                if (hourNow >= startHour and (daysBitmap & (1 << ltNow.tm_wday))) or (
+                    hourNow < endHour and (daysBitmap & (1 << yesterday))
                 ):
                     blnUseScheduledAmps = 1
             else:
@@ -132,9 +149,9 @@ class TWCMaster:
                 # 1-hour period between 7am and 8am.
                 hourNow = ltNow.tm_hour + (ltNow.tm_min / 60)
                 if (
-                    hourNow >= self.settings.get("scheduledAmpsStartHour", -1)
-                    and hourNow < self.getScheduledAmpsEndHour()
-                    and (self.getScheduledAmpsDaysBitmap() & (1 << ltNow.tm_wday))
+                    hourNow >= startHour
+                    and hourNow < endHour
+                    and (daysBitmap & (1 << ltNow.tm_wday))
                 ):
                     blnUseScheduledAmps = 1
         return blnUseScheduledAmps
@@ -150,19 +167,34 @@ class TWCMaster:
     def countSlaveTWC(self):
         return int(len(self.slaveTWCRoundRobin))
 
-    def debugLog(self, minlevel, function, message):
+    def debugLog(self, minlevel, function, message, fields=[]):
         # Trim/pad the module name as needed
         if len(function) < 10:
-            for a in range(len(function), 10):
+            for _ in range(len(function), 10):
                 function += " "
+        data = {
+            "debugLevel": self.debugLevel,
+            "fields": fields,
+            "function": function,
+            "logTime": self.time_now(),
+            "minLevel": minlevel,
+            "message": message,
+        }
+        atLeastOne = False
+        # Pass the debugLog message to all enabled Logging modules
+        for module in self.getModulesByType("Logging"):
+            atLeastOne = True
+            module["ref"].debugLog(data)
 
-        if self.debugLevel >= minlevel:
-            print(
-                colored(self.time_now() + " ", "yellow")
-                + colored(f("{function}"), "green")
-                + colored(f(" {minlevel} "), "cyan")
-                + f("{message}")
-            )
+        # First calls won't be printed, because there is no logger registered
+        if not (atLeastOne):
+            if data["debugLevel"] >= data["minLevel"]:
+                print(
+                    colored(data["logTime"] + " ", "yellow")
+                    + colored(f("{data['function']}"), "green")
+                    + colored(f(" {data['minLevel']} "), "cyan")
+                    + f("{data['message']}")
+                )
 
     def deleteBackgroundTask(self, task):
         del self.backgroundTasksCmds[task["cmd"]]
@@ -177,7 +209,23 @@ class TWCMaster:
         return self.allowedFlex
 
     def getBackgroundTask(self):
-        return self.backgroundTasksQueue.get()
+        result = None
+
+        while result is None:
+            # Insert any delayed tasks
+            while (
+                self.backgroundTasksDelayed
+                and self.backgroundTasksDelayed[0][0] <= datetime.now()
+            ):
+                self.queue_background_task(self.backgroundTasksDelayed.pop(0)[1])
+
+            # Get the next task
+            try:
+                result = self.backgroundTasksQueue.get(timeout=30)
+            except queue.Empty:
+                continue
+
+        return result
 
     def getBackgroundTasksLock(self):
         self.backgroundTasksLock.acquire()
@@ -222,8 +270,14 @@ class TWCMaster:
                 matched.append({"name": module, "ref": modinfo["ref"]})
         return matched
 
+    def getInterfaceModule(self):
+        return self.getModulesByType("Interface")[0]["ref"]
+
     def getScheduledAmpsDaysBitmap(self):
         return self.settings.get("scheduledAmpsDaysBitmap", 0x7F)
+
+    def getScheduledAmpsBatterySize(self):
+        return self.settings.get("scheduledAmpsBatterySize", 100)
 
     def getNonScheduledAmpsMax(self):
         nschedamps = int(self.settings.get("nonScheduledAmpsMax", 0))
@@ -240,10 +294,48 @@ class TWCMaster:
             return 0
 
     def getScheduledAmpsStartHour(self):
-        return self.settings.get("scheduledAmpsStartHour", -1)
+        return int(self.settings.get("scheduledAmpsStartHour", -1))
+
+    def getScheduledAmpsTimeFlex(self):
+        startHour = self.getScheduledAmpsStartHour()
+        days = self.getScheduledAmpsDaysBitmap()
+        if (
+            startHour >= 0
+            and self.getScheduledAmpsFlexStart()
+            and self.countSlaveTWC() == 1
+        ):
+            # Try to charge at the end of the scheduled time
+            slave = next(iter(self.slaveTWCs.values()))
+            vehicle = slave.getLastVehicle()
+            if vehicle != None:
+                amps = self.getScheduledAmpsMax()
+                watts = self.convertAmpsToWatts(amps) * self.getRealPowerFactor(amps)
+                hoursForFullCharge = self.getScheduledAmpsBatterySize() / (watts / 1000)
+                realChargeFactor = (vehicle.chargeLimit - vehicle.batteryLevel) / 100
+                # calculating startHour with a max Battery size - so it starts charging and then it has the time
+                startHour = round(
+                    self.getScheduledAmpsEndHour()
+                    - (hoursForFullCharge * realChargeFactor),
+                    2,
+                )
+                # Always starting a quarter of a hour earlier
+                startHour -= 0.25
+                # adding half an hour if battery should be charged over 98%
+                if vehicle.chargeLimit >= 98:
+                    startHour -= 0.5
+                if startHour < 0:
+                    startHour = startHour + 24
+                # if startHour is smaller than the intial startHour, then it should begin beginn charging a day later
+                # (if starting usually at 9pm and it calculates to start at 4am - it's already the next day)
+                if startHour < self.getScheduledAmpsDaysBitmap():
+                    days = self.rotl(days, 7)
+        return (startHour, self.getScheduledAmpsEndHour(), days)
 
     def getScheduledAmpsEndHour(self):
         return self.settings.get("scheduledAmpsEndHour", -1)
+
+    def getScheduledAmpsFlexStart(self):
+        return int(self.settings.get("scheduledAmpsFlexStart", False))
 
     def getSlaveLifetimekWh(self):
 
@@ -253,7 +345,7 @@ class TWCMaster:
         now = time.time()
         if now >= self.lastkWhPoll + 60:
             for slaveTWC in self.getSlaveTWCs():
-                self.getModuleByName("RS485").send(
+                self.getInterfaceModule().send(
                     bytearray(b"\xFB\xEB")
                     + self.TWCID
                     + slaveTWC.TWCID
@@ -264,11 +356,82 @@ class TWCMaster:
     def getSlaveSign(self):
         return self.slaveSign
 
+    def getStatus(self):
+
+        data = {
+            "carsCharging": self.num_cars_charging_now(),
+            "chargerLoadWatts": "%.2f" % float(self.getChargerLoad()),
+            "currentPolicy": str(self.getModuleByName("Policy").active_policy),
+            "maxAmpsToDivideAmongSlaves": "%.2f"
+            % float(self.getMaxAmpsToDivideAmongSlaves()),
+        }
+        consumption = float(self.getConsumption())
+        if consumption:
+            data["consumptionAmps"] = ("%.2f" % self.convertWattsToAmps(consumption),)
+            data["consumptionWatts"] = "%.2f" % consumption
+        else:
+            data["consumptionAmps"] = "%.2f" % 0
+            data["consumptionWatts"] = "%.2f" % 0
+        generation = float(self.getGeneration())
+        if generation:
+            data["generationAmps"] = ("%.2f" % self.convertWattsToAmps(generation),)
+            data["generationWatts"] = "%.2f" % generation
+        else:
+            data["generationAmps"] = "%.2f" % 0
+            data["generationWatts"] = "%.2f" % 0
+        if self.getModuleByName("Policy").policyIsGreen():
+            data["isGreenPolicy"] = "Yes"
+        else:
+            data["isGreenPolicy"] = "No"
+
+        data["scheduledChargingStartHour"] = self.getScheduledAmpsStartHour()
+        data["scheduledChargingFlexStart"] = self.getScheduledAmpsTimeFlex()[0]
+        data["scheduledChargingEndHour"] = self.getScheduledAmpsEndHour()
+        scheduledChargingDays = self.getScheduledAmpsDaysBitmap()
+        scheduledFlexTime = self.getScheduledAmpsTimeFlex()
+
+        data["ScheduledCharging"] = {
+            "enabled": data["scheduledChargingStartHour"] >= 0
+            and data["scheduledChargingEndHour"] >= 0
+            and scheduledChargingDays > 0
+            and self.getScheduledAmpsMax() > 0,
+            "amps": self.getScheduledAmpsMax(),
+            "startingMinute": int(data["scheduledChargingStartHour"] * 60)
+            if data["scheduledChargingStartHour"] >= 0
+            else -1,
+            "endingMinute": int(data["scheduledChargingEndHour"] * 60)
+            if data["scheduledChargingEndHour"] >= 0
+            else -1,
+            "monday": (scheduledChargingDays & 1) == 1,
+            "tuesday": (scheduledChargingDays & 2) == 2,
+            "wednesday": (scheduledChargingDays & 4) == 4,
+            "thursday": (scheduledChargingDays & 8) == 8,
+            "friday": (scheduledChargingDays & 16) == 16,
+            "saturday": (scheduledChargingDays & 32) == 32,
+            "sunday": (scheduledChargingDays & 64) == 64,
+            "flexStartEnabled": self.getScheduledAmpsFlexStart(),
+            "flexStartingMinute": int(scheduledFlexTime[0] * 60)
+            if scheduledFlexTime[0] >= 0
+            else -1,
+            "flexEndingMinute": int(scheduledFlexTime[1] * 60)
+            if scheduledFlexTime[1] >= 0
+            else -1,
+            "flexMonday": (scheduledFlexTime[2] & 1) == 1,
+            "flexTuesday": (scheduledFlexTime[2] & 2) == 2,
+            "flexWednesday": (scheduledFlexTime[2] & 4) == 4,
+            "flexThursday": (scheduledFlexTime[2] & 8) == 8,
+            "flexFriday": (scheduledFlexTime[2] & 16) == 16,
+            "flexSaturday": (scheduledFlexTime[2] & 32) == 32,
+            "flexSunday": (scheduledFlexTime[2] & 64) == 64,
+            "flexBatterySize": self.getScheduledAmpsBatterySize(),
+        }
+        return data
+
     def getSpikeAmps(self):
         return self.spikeAmpsToCancel6ALimit
 
     def getTimeLastTx(self):
-        return self.getModuleByName("RS485").timeLastTx
+        return self.getInterfaceModule().timeLastTx
 
     def getVehicleVIN(self, slaveID, part):
         prefixByte = None
@@ -280,7 +443,7 @@ class TWCMaster:
             prefixByte = bytearray(b"\xFB\xF1")
 
         if prefixByte:
-            self.getModuleByName("RS485").send(
+            self.getInterfaceModule().send(
                 prefixByte
                 + self.TWCID
                 + slaveID
@@ -300,7 +463,8 @@ class TWCMaster:
     def getChargerLoad(self):
         # Calculate in watts the load that the charger is generating so
         # that we can exclude it from the consumption if necessary
-        return self.convertAmpsToWatts(self.getTotalAmpsInUse())
+        amps = self.getTotalAmpsInUse()
+        return self.convertAmpsToWatts(amps) * self.getRealPowerFactor(amps)
 
     def getConsumption(self):
         consumptionVal = 0
@@ -372,9 +536,12 @@ class TWCMaster:
         # Fetches and uses consumptionW separately
         generationOffset = self.getGenerationOffset()
         solarW = float(generationW - generationOffset)
+        solarAmps = self.convertWattsToAmps(solarW)
 
         # Offer the smaller of the two, but not less than zero.
-        return max(min(newOffer, self.convertWattsToAmps(solarW)), 0)
+        amps = max(min(newOffer, solarAmps), 0)
+        amps = amps / self.getRealPowerFactor(amps)
+        return round(amps, 2)
 
     def getNormalChargeLimit(self, ID):
         if "chargeLimits" in self.settings and str(ID) in self.settings["chargeLimits"]:
@@ -402,19 +569,6 @@ class TWCMaster:
         totalAmps = 0
         for slaveTWC in self.getSlaveTWCs():
             totalAmps += slaveTWC.reportedAmpsActual
-            for module in self.getModulesByType("Status"):
-                module["ref"].setStatus(
-                    slaveTWC.TWCID,
-                    "amps_in_use",
-                    "ampsInUse",
-                    slaveTWC.reportedAmpsActual,
-                    "A",
-                )
-
-        for module in self.getModulesByType("Status"):
-            module["ref"].setStatus(
-                bytes("all", "UTF-8"), "total_amps_in_use", "totalAmpsInUse", totalAmps, "A"
-            )
 
         self.debugLog(
             10, "TWCMaster", "Total amps all slaves are using: " + str(totalAmps)
@@ -512,7 +666,7 @@ class TWCMaster:
         carapi.setCarApiRefreshToken(self.settings.get("carApiRefreshToken", ""))
         carapi.setCarApiTokenExpireTime(self.settings.get("carApiTokenExpireTime", ""))
 
-    def master_id_conflict():
+    def master_id_conflict(self):
         # We're playing fake slave, and we got a message from a master with our TWCID.
         # By convention, as a slave we must change our TWCID because a master will not.
         self.TWCID[0] = random.randint(0, 0xFF)
@@ -521,10 +675,12 @@ class TWCMaster:
         # Real slaves change their sign during a conflict, so we do too.
         self.slaveSign[0] = random.randint(0, 0xFF)
 
-        print(
-            time_now() + ": Master's TWCID matches our fake slave's TWCID.  "
+        self.debugLog(
+            1,
+            "TWCMaster",
+            "Master's TWCID matches our fake slave's TWCID.  "
             "Picked new random TWCID %02X%02X with sign %02X"
-            % (self.TWCID[0], self.TWCID[1], self.slaveSign[0])
+            % (self.TWCID[0], self.TWCID[1], self.slaveSign[0]),
         )
 
     def newSlave(self, newSlaveID, maxAmps):
@@ -541,9 +697,11 @@ class TWCMaster:
         self.addSlaveTWC(slaveTWC)
 
         if self.countSlaveTWC() > 3:
-            print(
+            self.debugLog(
+                1,
+                "TWCMaster"
                 "WARNING: More than 3 slave TWCs seen on network.  "
-                "Dropping oldest: " + self.hex_str(self.getSlaveTWCID(0)) + "."
+                "Dropping oldest: " + self.hex_str(self.getSlaveTWCID(0)) + ".",
             )
             self.deleteSlaveTWC(self.getSlaveTWCID(0))
 
@@ -558,7 +716,13 @@ class TWCMaster:
                     # We have detected that a vehicle has started charging on this Slave TWC
                     # Attempt to request the vehicle's VIN
                     slaveTWC.isCharging = 1
-                    self.queue_background_task({"cmd": "getVehicleVIN", "slaveTWC": slaveTWC.TWCID, "vinPart": 0})
+                    self.queue_background_task(
+                        {
+                            "cmd": "getVehicleVIN",
+                            "slaveTWC": slaveTWC.TWCID,
+                            "vinPart": 0,
+                        }
+                    )
 
                     # Record our VIN query timestamp
                     slaveTWC.lastVINQuery = time.time()
@@ -587,7 +751,11 @@ class TWCMaster:
             carsCharging += slaveTWC.isCharging
             for module in self.getModulesByType("Status"):
                 module["ref"].setStatus(
-                    slaveTWC.TWCID, "cars_charging", "carsCharging", slaveTWC.isCharging, ""
+                    slaveTWC.TWCID,
+                    "cars_charging",
+                    "carsCharging",
+                    slaveTWC.isCharging,
+                    "",
                 )
         self.debugLog(
             10, "TWCMaster", "Number of cars charging now: " + str(carsCharging)
@@ -598,7 +766,14 @@ class TWCMaster:
 
         return carsCharging
 
-    def queue_background_task(self, task):
+    def queue_background_task(self, task, delay=0):
+
+        if delay > 0:
+            bisect.insort(
+                self.backgroundTasksDelayed,
+                (datetime.now() + timedelta(seconds=delay), task),
+            )
+            return
 
         if task["cmd"] in self.backgroundTasksCmds:
             # Some tasks, like cmd='charge', will be called once per second until
@@ -653,70 +828,77 @@ class TWCMaster:
         # This function is called when a vehicle charge session ends.
         # If we have a last vehicle VIN set, close off the charging session
         # for this vehicle and save the settings.
-        if (not self.settings.get("Vehicles", None)):
-          self.settings["Vehicles"] = {}
-        if (self.settings["Vehicles"].get(slaveTWC.lastVIN, None)):
-          if (self.settings["Vehicles"][slaveTWC.lastVIN].get("startkWh", 0) > 0):
-            # End current session
-            delta = (slaveTWC.lifetimekWh - self.settings["Vehicles"][slaveTWC.lastVIN]["startkWh"])
-            self.settings["Vehicles"][slaveTWC.lastVIN]["startkWh"] = 0
-            self.settings["Vehicles"][slaveTWC.lastVIN]["totalkWh"] += delta
-            self.saveSettings()
+        if not self.settings.get("Vehicles", None):
+            self.settings["Vehicles"] = {}
+        if self.settings["Vehicles"].get(slaveTWC.lastVIN, None):
+            if self.settings["Vehicles"][slaveTWC.lastVIN].get("startkWh", 0) > 0:
+                # End current session
+                delta = (
+                    slaveTWC.lifetimekWh
+                    - self.settings["Vehicles"][slaveTWC.lastVIN]["startkWh"]
+                )
+                self.settings["Vehicles"][slaveTWC.lastVIN]["startkWh"] = 0
+                self.settings["Vehicles"][slaveTWC.lastVIN]["totalkWh"] += delta
+                self.queue_background_task({"cmd": "saveSettings"})
 
         # Update Charge Session details in logging modules
         for module in self.getModulesByType("Logging"):
-            module["ref"].stopChargeSession({
-                "TWCID": slaveTWC.TWCID,
-                "endkWh": slaveTWC.lifetimekWh,
-                "endTime": int(time.time()),
-                "endFormat": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            })
-
+            module["ref"].stopChargeSession(
+                {
+                    "TWCID": slaveTWC.TWCID,
+                    "endkWh": slaveTWC.lifetimekWh,
+                    "endTime": int(time.time()),
+                    "endFormat": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            )
 
     def recordVehicleSessionStart(self, slaveTWC):
         # Update Charge Session details in logging modules
         for module in self.getModulesByType("Logging"):
-            module["ref"].startChargeSession({
-                "TWCID": slaveTWC.TWCID,
-                "startkWh": slaveTWC.lifetimekWh,
-                "startTime": int(time.time()),
-                "startFormat": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            })
+            module["ref"].startChargeSession(
+                {
+                    "TWCID": slaveTWC.TWCID,
+                    "startkWh": slaveTWC.lifetimekWh,
+                    "startTime": int(time.time()),
+                    "startFormat": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+            )
 
     def recordVehicleVIN(self, slaveTWC):
         # Record Slave TWC ID as being capable of reporting VINs, if it is not
         # already.
         twcid = "%02X%02X" % (slaveTWC.TWCID[0], slaveTWC.TWCID[1])
-        if (not self.settings.get("SlaveTWCs", None)):
+        if not self.settings.get("SlaveTWCs", None):
             self.settings["SlaveTWCs"] = {}
-        if (not self.settings["SlaveTWCs"].get(twcid, None)):
+        if not self.settings["SlaveTWCs"].get(twcid, None):
             self.settings["SlaveTWCs"][twcid] = {}
-        if (not self.settings["SlaveTWCs"][twcid].get("supportsVINQuery", 0)):
+        if not self.settings["SlaveTWCs"][twcid].get("supportsVINQuery", 0):
             self.settings["SlaveTWCs"][twcid]["supportsVINQuery"] = 1
-            self.saveSettings()
+            self.queue_background_task({"cmd": "saveSettings"})
 
         # Increment sessions counter for this VIN in persistent settings file
-        if (not self.settings.get("Vehicles", None)):
-          self.settings["Vehicles"] = {}
-        if (not self.settings["Vehicles"].get(slaveTWC.currentVIN, None)):
-          self.settings["Vehicles"][slaveTWC.currentVIN] = {
-            "chargeSessions": 1,
-            "startkWh": slaveTWC.lifetimekWh,
-            "totalkWh": 0
-          }
+        if not self.settings.get("Vehicles", None):
+            self.settings["Vehicles"] = {}
+        if not self.settings["Vehicles"].get(slaveTWC.currentVIN, None):
+            self.settings["Vehicles"][slaveTWC.currentVIN] = {
+                "chargeSessions": 1,
+                "startkWh": slaveTWC.lifetimekWh,
+                "totalkWh": 0,
+            }
         else:
-          self.settings["Vehicles"][slaveTWC.currentVIN]["chargeSessions"] += 1
-          self.settings["Vehicles"][slaveTWC.currentVIN]["startkWh"] = slaveTWC.lifetimekWh
-          if (not self.settings["Vehicles"][slaveTWC.currentVIN].get("totalkWh", None)):
-            self.settings["Vehicles"][slaveTWC.currentVIN]["totalkWh"] = 0
-        self.saveSettings()
+            self.settings["Vehicles"][slaveTWC.currentVIN]["chargeSessions"] += 1
+            self.settings["Vehicles"][slaveTWC.currentVIN][
+                "startkWh"
+            ] = slaveTWC.lifetimekWh
+            if not self.settings["Vehicles"][slaveTWC.currentVIN].get("totalkWh", None):
+                self.settings["Vehicles"][slaveTWC.currentVIN]["totalkWh"] = 0
+        self.queue_background_task({"cmd": "saveSettings"})
 
         # Update Charge Session details in logging modules
         for module in self.getModulesByType("Logging"):
-            module["ref"].updateChargeSession({
-                "TWCID": slaveTWC.TWCID,
-                "vehicleVIN": slaveTWC.currentVIN
-            })
+            module["ref"].updateChargeSession(
+                {"TWCID": slaveTWC.TWCID, "vehicleVIN": slaveTWC.currentVIN}
+            )
 
     def releaseBackgroundTasksLock(self):
         self.backgroundTasksLock.release()
@@ -738,33 +920,44 @@ class TWCMaster:
     def removeNormalChargeLimit(self, ID):
         if "chargeLimits" in self.settings and str(ID) in self.settings["chargeLimits"]:
             del self.settings["chargeLimits"][str(ID)]
-            self.saveSettings()
+            self.queue_background_task({"cmd": "saveSettings"})
 
     def resetChargeNowAmps(self):
         # Sets chargeNowAmps back to zero, so we follow the green energy
         # tracking again
         self.settings["chargeNowAmps"] = 0
         self.settings["chargeNowTimeEnd"] = 0
+        self.queue_background_task({"cmd": "saveSettings"})
 
     def retryVINQuery(self):
         # For each Slave TWC, check if it's been more than 60 seconds since the last
         # VIN query without a VIN. If so, query again.
         for slaveTWC in self.getSlaveTWCs():
-           if slaveTWC.isCharging == 1:
-              if (slaveTWC.lastVINQuery > 0 and slaveTWC.vinQueryAttempt < 6 and not slaveTWC.currentVIN):
-                 if ((time.time() - slaveTWC.lastVINQuery) >= 60):
-                     self.queue_background_task({"cmd": "getVehicleVIN", "slaveTWC": slaveTWC.TWCID, "vinPart": 0})
-                     slaveTWC.vinQueryAttempt += 1
-                     slaveTWC.lastVINQuery = time.time()
-           else:
-              slaveTWC.lastVINQuery = 0
+            if slaveTWC.isCharging == 1:
+                if (
+                    slaveTWC.lastVINQuery > 0
+                    and slaveTWC.vinQueryAttempt < 6
+                    and not slaveTWC.currentVIN
+                ):
+                    if (time.time() - slaveTWC.lastVINQuery) >= 60:
+                        self.queue_background_task(
+                            {
+                                "cmd": "getVehicleVIN",
+                                "slaveTWC": slaveTWC.TWCID,
+                                "vinPart": 0,
+                            }
+                        )
+                        slaveTWC.vinQueryAttempt += 1
+                        slaveTWC.lastVINQuery = time.time()
+            else:
+                slaveTWC.lastVINQuery = 0
 
     def saveNormalChargeLimit(self, ID, outsideLimit, lastApplied):
         if not "chargeLimits" in self.settings:
             self.settings["chargeLimits"] = dict()
 
         self.settings["chargeLimits"][str(ID)] = (outsideLimit, lastApplied)
-        self.saveSettings()
+        self.queue_background_task({"cmd": "saveSettings"})
 
     def saveSettings(self):
         # Saves the volatile application settings (such as charger timings,
@@ -782,7 +975,11 @@ class TWCMaster:
             try:
                 json.dump(self.settings, outconfig)
             except TypeError as e:
-                self.debugLog(1, "TWCMaster", "Exception raised while attempting to save settings file:")
+                self.debugLog(
+                    1,
+                    "TWCMaster",
+                    "Exception raised while attempting to save settings file:",
+                )
                 self.debugLog(1, "TWCMaster", str(e))
 
     def send_master_linkready1(self):
@@ -835,7 +1032,7 @@ class TWCMaster:
         # send slave linkready every 10 seconds whether or not they got master
         # linkready1/2 and if a master sees slave linkready, it will start sending
         # the slave master heartbeat once per second and the two are then connected.
-        self.getModuleByName("RS485").send(
+        self.getInterfaceModule().send(
             bytearray(b"\xFC\xE1")
             + self.TWCID
             + self.masterSign
@@ -862,7 +1059,7 @@ class TWCMaster:
         # Once a master starts sending heartbeat messages to a slave, it
         # no longer sends the global linkready2 message (or if it does,
         # they're quite rare so I haven't seen them).
-        self.getModuleByName("RS485").send(
+        self.getInterfaceModule().send(
             bytearray(b"\xFB\xE2")
             + self.TWCID
             + self.masterSign
@@ -887,12 +1084,12 @@ class TWCMaster:
         if self.protocolVersion == 2:
             msg += bytearray(b"\x00\x00")
 
-        self.getModuleByName("RS485").send(msg)
+        self.getInterfaceModule().send(msg)
 
     def sendStartCommand(self):
         # This function will loop through each of the Slave TWCs, and send them the start command.
         for slaveTWC in self.getSlaveTWCs():
-            self.getModuleByName("RS485").send(
+            self.getInterfaceModule().send(
                 bytearray(b"\xFC\xB1")
                 + self.TWCID
                 + slaveTWC.TWCID
@@ -902,7 +1099,7 @@ class TWCMaster:
     def sendStopCommand(self):
         # This function will loop through each of the Slave TWCs, and send them the stop command.
         for slaveTWC in self.getSlaveTWCs():
-            self.getModuleByName("RS485").send(
+            self.getInterfaceModule().send(
                 bytearray(b"\xFC\xB2")
                 + self.TWCID
                 + slaveTWC.TWCID
@@ -995,6 +1192,10 @@ class TWCMaster:
     def setScheduledAmpsDaysBitmap(self, bitmap):
         self.settings["scheduledAmpsDaysBitmap"] = bitmap
 
+    def setScheduledAmpsBatterySize(self, batterySize):
+        if batterySize > 40:
+            self.settings["scheduledAmpsBatterySize"] = batterySize
+
     def setScheduledAmpsMax(self, amps):
         self.settings["scheduledAmpsMax"] = amps
 
@@ -1004,15 +1205,23 @@ class TWCMaster:
     def setScheduledAmpsEndHour(self, hour):
         self.settings["scheduledAmpsEndHour"] = hour
 
+    def setScheduledAmpsFlexStart(self, enabled):
+        self.settings["scheduledAmpsFlexStart"] = enabled
+
     def setSpikeAmps(self, amps):
         self.spikeAmpsToCancel6ALimit = amps
 
     def snapHistoryData(self):
         snaptime = self.nextHistorySnap
-        now = datetime.now().astimezone()
         avgCurrent = 0
 
-        if now < snaptime:
+        now = None
+        try:
+            now = datetime.now().astimezone()
+            if now < snaptime:
+                return
+        except ValueError as e:
+            self.debugLog(10, "TWCSlave  ", str(e))
             return
 
         for slave in self.getSlaveTWCs():
@@ -1029,7 +1238,8 @@ class TWCMaster:
             self.settings["history"].append(
                 (
                     periodTimestamp.isoformat(timespec="seconds"),
-                    self.convertAmpsToWatts(avgCurrent),
+                    self.convertAmpsToWatts(avgCurrent)
+                    * self.getRealPowerFactor(avgCurrent),
                 )
             )
 
@@ -1038,17 +1248,18 @@ class TWCMaster:
                 for e in self.settings["history"]
                 if datetime.fromisoformat(e[0]) >= (now - timedelta(days=2))
             ]
-            self.saveSettings()
+            self.queue_background_task({"cmd": "saveSettings"})
 
     def startCarsCharging(self):
         # This function is the opposite functionality to the stopCarsCharging function
         # below
-        if self.settings.get("chargeStopMode", "1") == "1":
+        stopMode = int(self.settings.get("chargeStopMode", 1))
+        if stopMode == 1:
             self.queue_background_task({"cmd": "charge", "charge": True})
             self.getModuleByName("Policy").clearOverride()
-        if self.settings.get("chargeStopMode", "1") == "2":
+        elif stopMode == 2:
             self.settings["respondToSlaves"] = 1
-        if self.settings.get("chargeStopMode", "1") == "3":
+        elif stopMode == 3:
             self.queue_background_task({"cmd": "charge", "charge": True})
 
     def stopCarsCharging(self):
@@ -1061,15 +1272,16 @@ class TWCMaster:
         # 1 = Stop the car(s) charging via the Tesla API
         # 2 = Stop the car(s) charging by refusing to respond to slave TWCs
         # 3 = Send TWC Stop command to each slave
-        if self.settings.get("chargeStopMode", "1") == "1":
+        stopMode = int(self.settings.get("chargeStopMode", 1))
+        if stopMode == 1:
             self.queue_background_task({"cmd": "charge", "charge": False})
             if self.stopTimeout == datetime.max:
-                self.stopTimeout = datetime.now() + timedelta(seconds = 10)
+                self.stopTimeout = datetime.now() + timedelta(seconds=10)
             elif datetime.now() > self.stopTimeout:
                 self.getModuleByName("Policy").overrideLimit()
-        if self.settings.get("chargeStopMode", "1") == "2":
+        if stopMode == 2:
             self.settings["respondToSlaves"] = 0
-        if self.settings.get("chargeStopMode", "1") == "3":
+        if stopMode == 3:
             self.sendStopCommand()
 
     def time_now(self):
@@ -1082,27 +1294,6 @@ class TWCMaster:
             if slaveTWC.TWCID == sender:
                 slaveTWC.setLifetimekWh(kWh)
                 slaveTWC.setVoltage(vPA, vPB, vPC)
-
-                # Publish Lifetime kWh Value via Status modules
-                for module in self.getModulesByType("Status"):
-                    module["ref"].setStatus(
-                        slaveTWC.TWCID,
-                        "lifetime_kwh",
-                        "lifetimekWh",
-                        slaveTWC.lifetimekWh,
-                        "kWh",
-                    )
-
-                    # Publish phase 1, 2 and 3 values via Status modules
-                    for phase in ("A", "B", "C"):
-                        for module in self.getModulesByType("Status"):
-                            module["ref"].setStatus(
-                                slaveTWC.TWCID,
-                                "voltage_phase_" + phase.lower(),
-                                "voltagePhase" + phase,
-                                getattr(slaveTWC, "voltsPhase" + phase, 0),
-                                "V",
-                            )
 
     def updateVINStatus(self):
         # update current and last VIN IDs for each Slave to all Status modules
@@ -1123,3 +1314,36 @@ class TWCMaster:
                     slaveTWC.lastVIN,
                     "",
                 )
+
+    def refreshingTotalAmpsInUseStatus(self):
+        for module in self.getModulesByType("Status"):
+            module["ref"].setStatus(
+                bytes("all", "UTF-8"),
+                "total_amps_in_use",
+                "totalAmpsInUse",
+                self.getTotalAmpsInUse(),
+                "A",
+            )
+
+    def getRealPowerFactor(self, amps):
+        realPowerFactorMinAmps = self.config["config"].get("realPowerFactorMinAmps", 1)
+        realPowerFactorMaxAmps = self.config["config"].get("realPowerFactorMaxAmps", 1)
+        minAmps = self.config["config"]["minAmpsPerTWC"]
+        maxAmps = self.config["config"]["wiringMaxAmpsAllTWCs"]
+        if minAmps == maxAmps:
+            return realPowerFactorMaxAmps
+        else:
+            return (
+                (amps - minAmps)
+                / (maxAmps - minAmps)
+                * (realPowerFactorMaxAmps - realPowerFactorMinAmps)
+            ) + realPowerFactorMinAmps
+
+    def rotl(self, num, bits):
+        bit = num & (1 << (bits - 1))
+        num <<= 1
+        if bit:
+            num |= 1
+        num &= 2 ** bits - 1
+
+        return num

@@ -52,9 +52,8 @@ class TeslaPowerwall2:
             )
 
         # Unload if this module is disabled or misconfigured
-        if ((not self.status) or (not self.serverIP)
-            or (int(self.serverPort) < 1)):
-            self.master.releaseModule("lib.TWCManager.EMS","TeslaPowerwall2");
+        if (not self.status) or (not self.serverIP) or (int(self.serverPort) < 1):
+            self.master.releaseModule("lib.TWCManager.EMS", "TeslaPowerwall2")
             return None
 
     @property
@@ -93,7 +92,7 @@ class TeslaPowerwall2:
     @property
     def batteryLevel(self):
         value = self.getSOE()
-        return float(value.get("percentage", 0))
+        return self.adjustPercentage(float(value.get("percentage", 0)))
 
     @property
     def operatingMode(self):
@@ -102,8 +101,11 @@ class TeslaPowerwall2:
 
     @property
     def reservePercent(self):
-        value = self.getOperation()
-        return float(value.get("backup_reserve_percent", 0))
+        if self.operatingMode == "backup":
+            return float(96)
+        else:
+            value = self.getOperation()
+            return self.adjustPercentage(float(value.get("backup_reserve_percent", 0)))
 
     @property
     def stormWatch(self):
@@ -113,6 +115,9 @@ class TeslaPowerwall2:
     def debugLog(self, minlevel, message):
         if self.debugLevel >= minlevel:
             self.master.debugLog(minlevel, "Powerwall2", message)
+
+    def adjustPercentage(self, raw_value):
+        return (raw_value - 5) / 0.95
 
     def doPowerwallLogin(self):
         # If we have password authentication configured, this function will submit
@@ -214,10 +219,15 @@ class TeslaPowerwall2:
                 )
                 r.raise_for_status()
             except Exception as e:
-                self.debugLog(
-                    4, "Error connecting to Tesla Powerwall 2 to fetch " + path
-                )
-                self.debugLog(10, str(e))
+                if hasattr(e,"response") and e.response.status_code == 403:
+                    self.debugLog(
+                        1, "Authentication required to access local Powerwall API"
+                    )
+                else:
+                    self.debugLog(
+                        4, "Error connecting to Tesla Powerwall 2 to fetch " + path
+                    )
+                    self.debugLog(10, str(e))
                 return lastData
 
             lastData = r.json()

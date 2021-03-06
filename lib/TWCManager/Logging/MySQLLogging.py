@@ -1,14 +1,18 @@
 # MySQLLogging module. Provides output to a MySQL Server for regular statistics
 # recording.
 
+
 class MySQLLogging:
 
-    config        = None
-    configConfig  = None
+    capabilities = {
+      "queryGreenEnergy": True
+    }
+    config = None
+    configConfig = None
     configLogging = None
-    db            = None
-    slaveSession  = {}
-    status        = False
+    db = None
+    slaveSession = {}
+    status = False
 
     def __init__(self, master):
         self.master = master
@@ -24,9 +28,9 @@ class MySQLLogging:
         self.status = self.configLogging.get("enabled", False)
 
         # Unload if this module is disabled or misconfigured
-        if (not self.status or not self.configLogging.get("host", None)):
-          self.master.releaseModule("lib.TWCManager.Logging","MySQLLogging");
-          return None
+        if not self.status or not self.configLogging.get("host", None):
+            self.master.releaseModule("lib.TWCManager.Logging", "MySQLLogging")
+            return None
 
         # Initialize the mute config tree if it is not already
         if not self.configLogging.get("mute", None):
@@ -40,11 +44,21 @@ class MySQLLogging:
                 self.configLogging.get("host", ""),
                 self.configLogging.get("username", ""),
                 self.configLogging.get("password", ""),
-                self.configLogging.get("database", "")
+                self.configLogging.get("database", ""),
             )
         except pymysql.err.OperationalError as e:
             self.master.debugLog(1, "MySQLLog", "Error connecting to MySQL database")
             self.master.debugLog(1, "MySQLLog", str(e))
+
+    def debugLog(self, logdata):
+        # debugLog is something of a catch-all if we don't have a specific
+        # logging function for the given data. It allows a log entry to be
+        # passed to us for storage.
+        return
+
+    def getCapabilities(self, capability):
+        # Allows query of module capabilities when deciding which Logging module to use
+        return self.capabilities.get(capability, False)
 
     def greenEnergy(self, data):
         # Check if this status is muted
@@ -62,7 +76,14 @@ class MySQLLogging:
         cur = self.db.cursor()
         rows = 0
         try:
-            rows = cur.execute(query, (data.get('genWatts', 0), data.get('conWatts', 0), data.get('chgWatts', 0)))
+            rows = cur.execute(
+                query,
+                (
+                    data.get("genWatts", 0),
+                    data.get("conWatts", 0),
+                    data.get("chgWatts", 0),
+                ),
+            )
         except Exception as e:
             self.master.debugLog(1, "MySQLLog", "Error updating MySQL database")
             self.master.debugLog(1, "MySQLLog", str(e))
@@ -71,9 +92,47 @@ class MySQLLogging:
             self.db.commit()
         else:
             # Issue, log message and rollback
-            self.master.debugLog(1, "MySQLLog", "Error updating MySQL database. Rows = %d" % rows)
+            self.master.debugLog(
+                1, "MySQLLog", "Error updating MySQL database. Rows = %d" % rows
+            )
             self.db.rollback()
         cur.close()
+
+    def queryGreenEnergy(self, data):
+        # Check if this status is muted
+        if self.configLogging["mute"].get("GreenEnergy", 0):
+            return None
+        # Ensure database connection is alive, or reconnect if not
+        self.db.ping(reconnect=True)
+
+        query = """
+            SELECT * from green_energy where time>%s and time<%s
+        """
+        cur = self.db.cursor()
+        rows = 0
+        try:
+            rows = cur.execute(
+                query,
+                (
+                    data.get("dateBegin", 0),
+                    data.get("dateEnd", 0),
+                ),
+            )
+        except Exception as e:
+            self.master.debugLog(1, "MySQLLog", str(e))
+
+        result={}
+        if rows:
+            # Query was successful. Commit
+            result = cur.fetchall()
+        else:
+            # Issue, log message
+            self.master.debugLog(
+                1, "MySQLLog", "Error query MySQL database. Rows = %d" % rows
+            )
+        cur.close()
+        return list(result)
+
 
     def slavePower(self, data):
         # Check if this status is muted
@@ -100,9 +159,16 @@ class MySQLLogging:
         """
         rows = 0
         try:
-            rows = cursor.execute(query, ("%02X%02X" % (data["TWCID"][0], 
-            data["TWCID"][1]), data["kWh"], data["voltsPerPhase"][0], 
-            data["voltsPerPhase"][1], data["voltsPerPhase"][2]))
+            rows = cursor.execute(
+                query,
+                (
+                    "%02X%02X" % (data["TWCID"][0], data["TWCID"][1]),
+                    data["kWh"],
+                    data["voltsPerPhase"][0],
+                    data["voltsPerPhase"][1],
+                    data["voltsPerPhase"][2],
+                ),
+            )
         except Exception as e:
             self.master.debugLog(1, "MySQLLog", "Error updating MySQL database")
             self.master.debugLog(1, "MySQLLog", str(e))
@@ -111,7 +177,9 @@ class MySQLLogging:
             self.db.commit()
         else:
             # Issue, log message and rollback
-            self.master.debugLog(1, "MySQLLog", "Error updating MySQL database. Rows = %d" % rows)
+            self.master.debugLog(
+                1, "MySQLLog", "Error updating MySQL database. Rows = %d" % rows
+            )
             self.db.rollback()
         cursor.close()
 
@@ -134,8 +202,9 @@ class MySQLLogging:
         cur = self.db.cursor()
         rows = 0
         try:
-            rows = cur.execute(query, (data.get("startTime", 0),
-                data.get("startkWh", 0), twcid))
+            rows = cur.execute(
+                query, (data.get("startTime", 0), data.get("startkWh", 0), twcid)
+            )
         except Exception as e:
             self.master.debugLog(1, "MySQLLog", "Error updating MySQL database")
             self.master.debugLog(1, "MySQLLog", str(e))
@@ -144,7 +213,9 @@ class MySQLLogging:
             self.db.commit()
         else:
             # Issue, log message and rollback
-            self.master.debugLog(1, "MySQLLog", "Error updating MySQL database. Rows = %d" % rows)
+            self.master.debugLog(
+                1, "MySQLLog", "Error updating MySQL database. Rows = %d" % rows
+            )
             self.db.rollback()
         cur.close()
 
@@ -176,7 +247,9 @@ class MySQLLogging:
             self.db.commit()
         else:
             # Issue, log message and rollback
-            self.master.debugLog(1, "MySQLLog", "Error updating MySQL database. Rows = %d" % rows)
+            self.master.debugLog(
+                1, "MySQLLog", "Error updating MySQL database. Rows = %d" % rows
+            )
             self.db.rollback()
         cur.close()
         self.slaveSession[twcid] = 0
