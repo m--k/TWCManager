@@ -1,4 +1,4 @@
-# TWCManager
+# TWCManager for SolarEdge Inverters
 
 [![Stable Release](https://img.shields.io/badge/Stable_Release-1.2.0-blue)](https://github.com/ngardiner/TWCManager/releases/tag/1.2.0)
 [![Development Release](https://img.shields.io/badge/Devel_Release-1.2.1-green.svg)](https://github.com/ngardiner/TWCManager/tree/v1.2.1)
@@ -42,6 +42,7 @@ EMS Interfaces read solar generation and/or consumption values from an external 
 | [Kostal (Pico/Plenticore)](docs/modules/EMS_Kostal.md) | Available v1.2.1 | Support for Kostal Inverters via ModBus |
 | [SmartMe](docs/modules/EMS_SmartMe.md)     | Available v1.2.1 | Support for smart-me.com API |
 | [SolarEdge](docs/modules/EMS_SolarEdge.md) | Available v1.2.0 | Support for SolarEdge API |
+| [SolarEdgeMeter](docs/modules/EMS_SolarEdgeMeter.md) | Available v0.0.0 | Support for SolarEdge inverters over Modbus-TCP |
 | [SolarLog](docs/modules/EMS_SolarLog.md)   | Available v1.2.0 | Supports SolarLog Base API |
 | [Tesla Powerwall2](docs/modules/EMS_Powerwall2.md) | Available v1.1.3 | Support for Tesla Powerwall 2 |
 | [The Energy Detective](docs/modules/EMS_TED.md) | Available v1.1.2 | Support for TED (The Energy Detective) |
